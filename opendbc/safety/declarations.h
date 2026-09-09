@@ -260,6 +260,9 @@ extern bool regen_braking;
 extern bool regen_braking_prev;
 extern bool steering_disengage;
 extern bool steering_disengage_prev;
+// tesla_preap: keep controls_allowed on EPAS hands-on / reject during a
+// blinker-latched driver turn (generic_rx_checks rising-edge path).
+extern bool steering_disengage_keep_controls;
 extern bool cruise_engaged_prev;
 extern struct sample_t vehicle_speed;
 extern bool vehicle_moving;
