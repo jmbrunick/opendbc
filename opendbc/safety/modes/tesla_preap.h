@@ -40,9 +40,9 @@
 //   - Steering angle + rate limits via steer_angle_cmd_checks_vm()
 //   - controls_allowed gating on all TX
 //   - Disengage on hands-on override (level >= 2), except during a
-//     blinker-latched driver turn (one lamp XOR, physical LEFT/RIGHT,
-//     flash-latched ~1s, then hand-on until release). ALC keep-alive
-//     flashes and hazards are not a driver turn.
+//     blinker-latched driver turn in tesla_preap_blinker.h (one lamp XOR,
+//     physical LEFT/RIGHT, flash-latched ~1s, then hand-on until release).
+//     ALC keep-alive flashes and hazards are not a driver turn.
 //   - Disengage on EPAS error codes 6-9, except during that same turn
 //   - Disengage on door open, gear out of Drive
 //   - Disengage on stalk cancel (with 600ms echo filter)
@@ -121,246 +121,134 @@ static uint8_t preap_pedal_tx_counter = 0U;
 static uint32_t preap_last_stalk_engage_us = 0;
 #define PREAP_CANCEL_ECHO_WINDOW_US 600000U  // 600ms
 
-// Blinker-turn latch — matches BlinkerLateralHold / blinker_turn_blocks_
-// steering_disengage on nap-dev. GTW lamp bits flash (~0.3s dark); latch
-// through those gaps until both lamps have been dark for ~1s. A held
-// LEFT/RIGHT stalk is a driver turn (0.40s from idle; 1.0s same-direction
-// after a tip / ALC keep-alive). A tip (LEFT/RIGHT then IDLE within 0.40s)
-// is ALC: do not latch leftover keep-alive flashes as a turn. Hazards
-// (both lamps) are not a turn. Stalk cancel / doors / gear still drop.
-#define PREAP_LAMP_OFF_DEBOUNCE_US     1000000U
-#define PREAP_STALK_TIP_HOLD_US         400000U
-#define PREAP_STALK_ALC_TURN_HOLD_US   1000000U
 
-static bool preap_left_lamp = false;
-static bool preap_right_lamp = false;
-static bool preap_steering_disengage = false;
-static int preap_hands_on_level = 0;
-static bool preap_turn_active = false;
-static bool preap_turn_holding = false;
-static bool preap_lamp_dark_counting = false;
-static uint32_t preap_lamp_dark_since_us = 0;
-static bool preap_alc_keep = false;
-static bool preap_alc_dark_counting = false;
-static uint32_t preap_alc_dark_since_us = 0;
-static int preap_alc_direction = 0;  // 0 unknown, 1 left, 2 right
-static int preap_stalk_dir = 0;      // 0 idle/SNA, 1 left, 2 right
-static uint32_t preap_stalk_held_since_us = 0;
-static bool preap_stalk_tip_event = false;
-static int preap_stalk_tip_dir = 0;
+#include "opendbc/safety/modes/tesla_preap_blinker.h"
+#include "opendbc/safety/modes/tesla_preap_radar.h"
+#include "opendbc/safety/modes/tesla_preap_rx.h"
 
-static void preap_reset_blinker_hold(void) {
-  preap_left_lamp = false;
-  preap_right_lamp = false;
-  preap_steering_disengage = false;
-  preap_hands_on_level = 0;
-  preap_turn_active = false;
-  preap_turn_holding = false;
-  preap_lamp_dark_counting = false;
-  preap_lamp_dark_since_us = 0;
-  preap_alc_keep = false;
-  preap_alc_dark_counting = false;
-  preap_alc_dark_since_us = 0;
-  preap_alc_direction = 0;
-  preap_stalk_dir = 0;
-  preap_stalk_held_since_us = 0;
-  preap_stalk_tip_event = false;
-  preap_stalk_tip_dir = 0;
+#include "opendbc/safety/modes/tesla_preap_tx.h"
+
+// ============================================
+// Init
+// ============================================
+
+static safety_config tesla_preap_init(uint16_t param) {
+  const bool calib_requested = GET_FLAG(param, PREAP_FLAG_PEDAL_CALIBRATION);
+  const bool mixed_calib = calib_requested &&
+                           (param != PREAP_FLAG_PEDAL_CALIBRATION) &&
+                           (param != (PREAP_FLAG_PEDAL_CALIBRATION | PREAP_FLAG_PEDAL_BUS_ZERO));
+  preap_pedal_calibration = calib_requested && !mixed_calib;
+  preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL) && !preap_pedal_calibration && !mixed_calib;
+  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION) && !preap_pedal_calibration && !mixed_calib;
+  preap_pedal_bus = GET_FLAG(param, PREAP_FLAG_PEDAL_BUS_ZERO) ? 0U : 2U;
+
+  preap_gear = 4;
+  preap_gear_prev = 4;
+  preap_doors_open = false;
+  preap_di_brake_pressed = false;
+  preap_brake_message_pressed = false;
+  preap_gear_seen = false;
+  preap_gear_ts = 0U;
+  preap_di_brake_seen = false;
+  preap_di_brake_ts = 0U;
+  preap_brake_message_seen = false;
+  preap_brake_message_ts = 0U;
+  preap_esp_seen = false;
+  preap_esp_ts = 0U;
+  preap_esp_standstill = false;
+  preap_pedal_tx_counter_seen = false;
+  preap_pedal_tx_counter = 0U;
+  preap_pedal_can = -1;
+  preap_radar_status = 0;
+  preap_last_radar_signal = 0;
+  preap_last_stalk_engage_us = 0;
+  preap_reset_blinker_hold();
+  preap_radar_position = 0;
+  preap_radar_epas_type = 0;
+  preap_radar_vin_complete = 0;
+  preap_radar_should_send = false;
+  for (int i = 0; i < 17; i++) {
+    preap_radar_vin[i] = (uint8_t)' ';
+  }
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  preap_radar_car_config_captured = false;
+  preap_radar_vin_feed_captured = false;
+#endif
+
+  // TX whitelist — no harness relay on Pre-AP
+  static const CanMsg PREAP_TX_MSGS[] = {
+    {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x2B9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_control
+    {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},  // EPB_epasControl
+    {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 0
+    {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
+    {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
+    {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
+    {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
+    {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
+  };
+
+  // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
+  // EPAS firmware's checksum matches our compute_checksum exactly.
+  // Mismatched validation caused silent 21s steering dropout.
+  static RxCheck preap_rx_checks[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque1
+    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque2
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
+    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState
+    {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // STW_ACTN_RQ
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_B
+  };
+
+  // Pedal-enabled variant: adds 0x552 (GAS_SENSOR) to rx_checks so the
+  // framework routes it to the rx hook. Split into its own array because
+  // frequency=0 causes divide-by-zero in safety_tick (safety.h:330), which
+  // marks the check as lagging and trips safetyRxChecksInvalid → controls
+  // mismatch on cars without a pedal. 50Hz matches the Comma Pedal firmware.
+  static RxCheck preap_rx_checks_with_pedal[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x552, 0, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true},
+             {0x552, 2, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR
+  };
+
+  static const CanMsg PREAP_TX_MSGS_CAL_BUS0[] = {
+    {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},
+  };
+  static const CanMsg PREAP_TX_MSGS_CAL_BUS2[] = {
+    {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},
+  };
+  if (mixed_calib) {
+    return (safety_config){NULL, 0, NULL, 0, true}; // NOLINT(readability/braces)
+  }
+  if (preap_pedal_calibration) {
+    return (preap_pedal_bus == 0U) ? BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_CAL_BUS0)
+                                   : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_CAL_BUS2);
+  }
+  return preap_enable_pedal ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS)
+                            : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
 }
 
-static int preap_normalize_stalk(int raw) {
-  return ((raw == 1) || (raw == 2)) ? raw : 0;
-}
+// ============================================
+// Hooks struct
+// ============================================
 
-static void preap_update_stalk(int raw) {
-  const int stalk = preap_normalize_stalk(raw);
-  const uint32_t now = microsecond_timer_get();
-  preap_stalk_tip_event = false;
-  preap_stalk_tip_dir = 0;
-  if ((stalk == 1) || (stalk == 2)) {
-    if (preap_stalk_dir != stalk) {
-      preap_stalk_dir = stalk;
-      preap_stalk_held_since_us = now;
-    }
-  } else {
-    if ((preap_stalk_dir == 1) || (preap_stalk_dir == 2)) {
-      const uint32_t held = now - preap_stalk_held_since_us;
-      if (held < PREAP_STALK_TIP_HOLD_US) {
-        preap_stalk_tip_event = true;
-        preap_stalk_tip_dir = preap_stalk_dir;
-      }
-    }
-    preap_stalk_dir = 0;
-    preap_stalk_held_since_us = 0;
-  }
-}
-
-static bool preap_stalk_pending(void) {
-  if ((preap_stalk_dir != 1) && (preap_stalk_dir != 2)) {
-    return false;
-  }
-  return (microsecond_timer_get() - preap_stalk_held_since_us) < PREAP_STALK_TIP_HOLD_US;
-}
-
-static bool preap_stalk_is_driver_turn(void) {
-  if ((preap_stalk_dir != 1) && (preap_stalk_dir != 2)) {
-    return false;
-  }
-  const uint32_t held = microsecond_timer_get() - preap_stalk_held_since_us;
-  if (!preap_alc_keep) {
-    return held >= PREAP_STALK_TIP_HOLD_US;
-  }
-  if (((preap_alc_direction == 1) || (preap_alc_direction == 2)) &&
-      (preap_stalk_dir != preap_alc_direction)) {
-    return held >= PREAP_STALK_TIP_HOLD_US;
-  }
-  return held >= PREAP_STALK_ALC_TURN_HOLD_US;
-}
-
-static void preap_enter_alc_keep(int direction) {
-  preap_turn_active = false;
-  preap_turn_holding = false;
-  preap_lamp_dark_counting = false;
-  preap_lamp_dark_since_us = 0;
-  preap_alc_keep = true;
-  preap_alc_dark_counting = false;
-  preap_alc_dark_since_us = 0;
-  if (((direction == 1) || (direction == 2)) &&
-      (preap_alc_direction != 1) && (preap_alc_direction != 2)) {
-    preap_alc_direction = direction;
-  }
-}
-
-static void preap_update_blinker_hold(void) {
-  // Disengaged: drop latch. Same as BlinkerLateralHold.update(engaged=False).
-  if (!controls_allowed) {
-    preap_reset_blinker_hold();
-    return;
-  }
-
-  const uint32_t now = microsecond_timer_get();
-  const bool one_lamp = preap_left_lamp != preap_right_lamp;
-  const bool both_dark = (!preap_left_lamp) && (!preap_right_lamp);
-  const int lamp_dir = (preap_left_lamp && !preap_right_lamp) ? 1 :
-                       (preap_right_lamp && !preap_left_lamp) ? 2 : 0;
-
-  if (preap_alc_keep && ((lamp_dir == 1) || (lamp_dir == 2)) &&
-      (preap_alc_direction != 1) && (preap_alc_direction != 2)) {
-    preap_alc_direction = lamp_dir;
-  }
-
-  if (preap_stalk_is_driver_turn()) {
-    preap_alc_keep = false;
-    preap_alc_dark_counting = false;
-    preap_alc_dark_since_us = 0;
-    preap_alc_direction = 0;
-    preap_turn_active = true;
-    preap_lamp_dark_counting = false;
-    preap_lamp_dark_since_us = 0;
-  } else if ((!preap_turn_active) && (!preap_turn_holding) && preap_stalk_tip_event) {
-    const int direction = (preap_stalk_tip_dir != 0) ? preap_stalk_tip_dir : lamp_dir;
-    preap_enter_alc_keep(direction);
-    preap_stalk_tip_event = false;
-    return;
-  } else if (preap_stalk_pending()) {
-    // Not yet tip vs turn. Do not latch a turn from the driver's lamps.
-    if (!(preap_turn_active || preap_turn_holding)) {
-      return;
-    }
-  }
-
-  if (preap_alc_keep) {
-    if (both_dark) {
-      if (!preap_alc_dark_counting) {
-        preap_alc_dark_counting = true;
-        preap_alc_dark_since_us = now;
-      }
-      if ((now - preap_alc_dark_since_us) >= PREAP_LAMP_OFF_DEBOUNCE_US) {
-        preap_alc_keep = false;
-        preap_alc_dark_counting = false;
-        preap_alc_dark_since_us = 0;
-        preap_alc_direction = 0;
-      }
-    } else {
-      preap_alc_dark_counting = false;
-      preap_alc_dark_since_us = 0;
-      if (((lamp_dir == 1) || (lamp_dir == 2)) &&
-          (preap_alc_direction != 1) && (preap_alc_direction != 2)) {
-        preap_alc_direction = lamp_dir;
-      }
-    }
-    if (preap_alc_keep) {
-      preap_turn_active = false;
-      preap_turn_holding = false;
-      return;
-    }
-  }
-
-  if (one_lamp) {
-    preap_turn_active = true;
-    preap_lamp_dark_counting = false;
-    preap_lamp_dark_since_us = 0;
-  } else if (preap_turn_active) {
-    if (both_dark) {
-      // High EPS torque means the driver is still in the corner.
-      if (preap_steering_disengage) {
-        preap_lamp_dark_counting = false;
-        preap_lamp_dark_since_us = 0;
-      } else {
-        if (!preap_lamp_dark_counting) {
-          preap_lamp_dark_counting = true;
-          preap_lamp_dark_since_us = now;
-        }
-        if ((now - preap_lamp_dark_since_us) >= PREAP_LAMP_OFF_DEBOUNCE_US) {
-          preap_turn_active = false;
-          preap_lamp_dark_counting = false;
-          preap_lamp_dark_since_us = 0;
-        }
-      }
-    } else {
-      // Hazards (both lamps) are not a turn.
-      preap_turn_active = false;
-      preap_lamp_dark_counting = false;
-      preap_lamp_dark_since_us = 0;
-    }
-  }
-
-  // Python holding uses torsion-bar steeringPressed or hands-on >= 2.
-  // Panda has EPAS_handsOnLevel; >= 1 is "wheel still held" after the turn.
-  const bool wheel_held = preap_steering_disengage || (preap_hands_on_level >= 1);
-  if (preap_turn_active) {
-    preap_turn_holding = true;
-  } else if (preap_turn_holding && wheel_held) {
-    // post-turn hand-on window
-  } else {
-    preap_turn_holding = false;
-  }
-}
-
-static bool preap_blinker_turn_blocks_disengage(void) {
-  // Hard gate matches blinker_turn_blocks_steering_disengage: one lamp
-  // XOR, physical LEFT/RIGHT, or the flash-latch / post-turn hold.
-  // ALC keep-alive is not a driver turn (no turn_active), so leftover
-  // flashes do not by themselves keep controls_allowed once lamps are dark.
-  if (preap_left_lamp != preap_right_lamp) {
-    return true;
-  }
-  if ((preap_stalk_dir == 1) || (preap_stalk_dir == 2)) {
-    return true;
-  }
-  return preap_turn_active || preap_turn_holding;
-}
-
-// Radar emulation state
-static int preap_radar_status = 0;
-static uint32_t preap_last_radar_signal = 0;
-static int preap_radar_epas_type = 0;
-static int preap_radar_position = 0;
-static uint8_t preap_radar_vin[17];
-static uint8_t preap_radar_vin_complete = 0;
-static bool preap_radar_should_send = false;
-
-// Host→panda donor config. 0x560 never goes on the car; tesla_preap_tx_hook
-// consumes it. Layout matches Tinkla 0.6.6 create_radar_VIN_msg.
-#define PREAP_RADAR_VIN_ADDR 0x560U
-#define PREAP_RADAR_UDS_ADDR 0x641U
+const safety_hooks tesla_preap_hooks = {
+  .init = tesla_preap_init,
+  .rx = tesla_preap_rx_hook,
+  .rx_all = tesla_preap_gtw_emulation,  // must see ALL CAN traffic for radar GTW forwarding
+  .tx = tesla_preap_tx_hook,
+  .fwd = tesla_preap_fwd_hook,
+  .get_counter = tesla_preap_get_counter,
+  .get_checksum = tesla_preap_get_checksum,
+  .compute_checksum = tesla_preap_compute_checksum,
+  .get_quality_flag_valid = NULL,
+};
