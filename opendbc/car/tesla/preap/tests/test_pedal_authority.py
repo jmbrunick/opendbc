@@ -471,8 +471,10 @@ def test_active_pedal_releases_once_then_stays_silent(controller_env, override):
   assert _decode_pedal_command(active[0]).enabled
 
   if override == "brake":
+    # Deeper brake: stock regen immediately (not the tip-coast path).
     cs.enableLongControl = False
     cs.real_brake_pressed = True
+    cs.out.aEgo = -2.0
   else:
     cc.longActive = False
     cs.out.gasPressed = True
@@ -730,6 +732,7 @@ def test_brake_after_gas_clears_handoff_so_resume_keeps_grace(controller_env):
   controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0)
   cs.out.gasPressed = False
   cs.real_brake_pressed = True
+  cs.out.aEgo = -2.0
   cs.enableLongControl = False
   controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0)
   assert not controller.gas_long_handoff_pending
