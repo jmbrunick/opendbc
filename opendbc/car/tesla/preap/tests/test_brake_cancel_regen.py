@@ -79,9 +79,10 @@ def test_short_brake_cancel_ramps_then_releases():
 
   assert _step(fsm, brake_pressed=False)
   assert fsm.mode == BrakeCancelMode.RAMP
-  assert fsm.commanded_accel() == pytest.approx(0.0)
+  # Transition frame already advances the ramp (no extra coast sample).
+  assert fsm.commanded_accel() == pytest.approx(interpolate_regen_accel(DT))
 
-  accels = [fsm.commanded_accel()]
+  accels = [0.0, fsm.commanded_accel()]
   while fsm.ramp_s + DT + 1e-9 < BRAKE_CANCEL_RAMP_S:
     assert _step(fsm, brake_pressed=False)
     assert fsm.mode == BrakeCancelMode.RAMP
