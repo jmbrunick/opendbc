@@ -654,14 +654,21 @@ def test_gas_override_timeout_rearm_has_no_launch(controller_env):
 
 def test_gas_lift_handoff_seed_uses_non_negative_aego():
   assert gas_lift_handoff_seed_accel(0.62, -0.4, 0.8, 0.5) == pytest.approx(0.62)
-  assert gas_lift_handoff_seed_accel(-0.3, 0.41, 0.8, 0.5) == pytest.approx(0.41)
-  assert gas_lift_handoff_seed_accel(-0.3, -0.2, 0.8, 0.5) == pytest.approx(0.0)
+  assert gas_lift_handoff_seed_accel(-0.3, 0.41, 0.8, 0.5) == pytest.approx(0.5)
+  assert gas_lift_handoff_seed_accel(-0.3, -0.2, 0.8, 0.5) == pytest.approx(0.5)
 
 
 def test_gas_lift_handoff_seed_max_brake_and_lead_win():
   assert gas_lift_handoff_seed_accel(1.618, 0.1, 0.8, 0.67) == pytest.approx(0.8)
   assert gas_lift_handoff_seed_accel(0.62, 0.1, 0.8, -1.2) == pytest.approx(0.0)
   assert gas_lift_handoff_seed_accel(0.62, 0.1, 0.8, float('nan')) == pytest.approx(0.0)
+
+
+def test_gas_lift_handoff_seed_uses_planner_climb_not_only_aego():
+  # Mannerisms Accel 1 / 5 / 10 comfort a (Normal lookahead): 0.36 / 0.80 / 1.60
+  assert gas_lift_handoff_seed_accel(0.08, 0.05, 0.8, 0.36) == pytest.approx(0.36)
+  assert gas_lift_handoff_seed_accel(0.08, 0.05, 0.8, 0.80) == pytest.approx(0.80)
+  assert gas_lift_handoff_seed_accel(0.08, 0.05, 0.8, 1.60) == pytest.approx(0.8)
 
 
 def test_engage_without_prior_gas_keeps_grace_floor(controller_env):

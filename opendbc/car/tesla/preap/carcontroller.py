@@ -32,13 +32,14 @@ def gas_lift_handoff_seed_accel(last_nonneg_a_ego, measured_accel, engage_a_max,
                                 planner_accel):
   """Seed VDAS commanded accel after a gas→long handoff.
 
-  Uses last non-negative measured accel (not commanded_accel=0). Clamped to
+  Open-road climb uses the planner request (Mannerisms Accel 1–10 toward
+  MAX) as well as last non-negative aEgo — not aEgo alone. Clamped to
   [0, engage_a_max]. Lead hard decel / FCW / should-stop (planner < 0) win.
   """
   if not np.isfinite(planner_accel) or planner_accel < 0.0:
     return 0.0
   seed = 0.0
-  for candidate in (last_nonneg_a_ego, measured_accel):
+  for candidate in (last_nonneg_a_ego, measured_accel, planner_accel):
     if np.isfinite(candidate) and candidate >= 0.0:
       seed = max(seed, float(candidate))
   if not np.isfinite(engage_a_max) or engage_a_max <= 0.0:
