@@ -270,6 +270,10 @@ def _drop_long_on_brake(cc, cs, *, a_ego=0.0, v_ego=V_GLIDE):
   cs.out.vEgo = v_ego
 
 
+def _step_controller(controller, cc, cs, tesla_can, frame):
+  return controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+
+
 def test_controller_short_cancel_glides_speed_target(controller_env):
   controller, cc, cs, tesla_can = controller_env
   _activate_longitudinal(cc, cs)
@@ -289,8 +293,11 @@ def test_controller_short_cancel_glides_speed_target(controller_env):
   cc.actuators.accel = -1.2  # stale planner must not punch the glide
   accels = []
   pedal_di = []
-  for frame in range(4, 40, 2):
-    sent = controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+  # Every card frame (100 Hz). Odd frames do not TX but the FSM still advances.
+  for frame in range(3, 90):
+    sent = _step_controller(controller, cc, cs, tesla_can, frame)
+    if frame % 2:
+      continue
     assert _decode_pedal_command(sent[0]).enabled
     assert cs.pedal_brake_tip_glide
     accels.append(controller.brake_cancel.commanded_accel())
@@ -318,8 +325,10 @@ def test_controller_glide_releases_after_window(controller_env):
 
   released = False
   last_enabled_frame = 2
-  for frame in range(4, 320, 2):
-    sent = controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+  for frame in range(3, 320):
+    sent = _step_controller(controller, cc, cs, tesla_can, frame)
+    if frame % 2:
+      continue
     if sent and not _decode_pedal_command(sent[0]).enabled:
       released = True
       # ~2.5 s window, not the 0.75 s regen fade.
@@ -329,7 +338,7 @@ def test_controller_glide_releases_after_window(controller_env):
     last_enabled_frame = frame
   assert released
   assert last_enabled_frame * 0.01 > 0.75
-  assert controller.update(cc, cs, frame=frame + 2, tesla_can=tesla_can, can_bus_party=0) == []
+  assert _step_controller(controller, cc, cs, tesla_can, frame + 2) == []
 
 
 def test_controller_held_brake_releases_to_stock(controller_env):
