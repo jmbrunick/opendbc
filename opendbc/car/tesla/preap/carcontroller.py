@@ -7,7 +7,6 @@ from opendbc.car import Bus
 from opendbc.car.tesla.preap.nap_conf import nap_conf
 from opendbc.car.tesla.preap.interface import get_preap_accel_limits
 from opendbc.car.tesla.pedal.controller import get_zero_torque, PEDAL_RAMP_RATE_UP
-from opendbc.car.tesla.preap.brake_cancel_regen import BrakeCancelRegen
 from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.values import CANBUS, CruiseButtons
@@ -220,7 +219,6 @@ class PreAPLongController:
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
-    self.brake_cancel = BrakeCancelRegen()
 
   def _update_gas_lift_handoff_state(self, requested_long, gas_pressed, brake_pressed, a_ego):
     """Track gas falling edge / last non-negative aEgo while software long is up."""
@@ -268,15 +266,6 @@ class PreAPLongController:
     gas_pressed = bool(getattr(CS.out, 'gasPressed', False))
     brake_pressed = bool(getattr(CS, 'real_brake_pressed', False))
     self._update_gas_lift_handoff_state(requested_long, gas_pressed, brake_pressed, CS.out.aEgo)
-    keep_enabled = self.brake_cancel.update(
-      requested_long=requested_long,
-      cruise_enabled=bool(CS.cruiseEnabled),
-      brake_pressed=brake_pressed,
-      gas_pressed=gas_pressed,
-      a_ego=float(CS.out.aEgo),
-      v_ego=float(CS.out.vEgo),
-      dt=0.01,
-    )
     if (not long_active
         or brake_pressed
         or gas_pressed):
@@ -306,11 +295,7 @@ class PreAPLongController:
     self.prev_requested_long = requested_long
 
     if frame % 2 == 0:
-      authority_requested = (
-        pedal_long_allowed
-        and not gas_pressed
-        and ((long_active and not brake_pressed) or keep_enabled)
-      )
+      authority_requested = pedal_long_allowed and long_active and not brake_pressed and not gas_pressed
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
       in_engage_grace = False
 
@@ -376,15 +361,7 @@ class PreAPLongController:
             if self.preap_long_handoff_slew_active
             else PEDAL_RAMP_RATE_UP
           )
-          if keep_enabled and not long_active:
-            # Tip brake-cancel: interpolate accel_request 0 → stock regen
-            # through existing VDAS (ENABLE=1). Not a GAS_COMMAND DI rewrite
-            # and not a coast plateau then RELEASE. Planner / FCW a is
-            # ignored here — effort is pinned to the ramp.
-            accel_request = self.brake_cancel.commanded_accel()
-            in_engage_grace = False
-            accel_effort_limits = self.brake_cancel.accel_effort_limits()
-          elif in_engage_grace:
+          if in_engage_grace:
             # Cap at grace_progress * engage_a_max so the ceiling is the
             # tuned accel-profile envelope, not the live MPC request.
             # Keeps an MPC outlier on engage from propagating through.
@@ -396,8 +373,7 @@ class PreAPLongController:
 
           self.prev_pedal_di = self.vdas.update(
             accel_request, CS.out.vEgo, self.prev_pedal_di,
-            a_ego=CS.out.aEgo,
-            freeze_integrator=in_engage_grace or (keep_enabled and not long_active),
+            a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
             orientation_ned=list(CC.orientationNED),
             accel_effort_limits=accel_effort_limits,
             pedal_ramp_rate_up=pedal_ramp_rate_up)
@@ -442,7 +418,6 @@ class PreAPLongController:
         self.regen_decel_monitor.reset()
 
       CS.pedal_authority_requested = authority_requested
-      CS.pedal_brake_cancel_ramp = bool(keep_enabled)
       CS.pedal_authority_active = (
         self.pedal_authority.state == PedalAuthorityState.ACTIVE
         and not CS.engagement.pedal_unavailable
