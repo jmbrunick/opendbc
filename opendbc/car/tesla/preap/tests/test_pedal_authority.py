@@ -471,7 +471,7 @@ def test_active_pedal_releases_once_then_stays_silent(controller_env, override):
   assert _decode_pedal_command(active[0]).enabled
 
   if override == "brake":
-    # Deeper brake: stock regen immediately (not the tip-coast path).
+    # Deeper brake: stock regen immediately (not the tip-ramp path).
     cs.enableLongControl = False
     cs.real_brake_pressed = True
     cs.out.aEgo = -2.0

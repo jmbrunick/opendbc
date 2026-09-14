@@ -268,7 +268,7 @@ class PreAPLongController:
     gas_pressed = bool(getattr(CS.out, 'gasPressed', False))
     brake_pressed = bool(getattr(CS, 'real_brake_pressed', False))
     self._update_gas_lift_handoff_state(requested_long, gas_pressed, brake_pressed, CS.out.aEgo)
-    keep_coast = self.brake_cancel.update(
+    keep_enabled = self.brake_cancel.update(
       requested_long=requested_long,
       cruise_enabled=bool(CS.cruiseEnabled),
       brake_pressed=brake_pressed,
@@ -309,7 +309,7 @@ class PreAPLongController:
       authority_requested = (
         pedal_long_allowed
         and not gas_pressed
-        and ((long_active and not brake_pressed) or keep_coast)
+        and ((long_active and not brake_pressed) or keep_enabled)
       )
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
       in_engage_grace = False
@@ -376,12 +376,14 @@ class PreAPLongController:
             if self.preap_long_handoff_slew_active
             else PEDAL_RAMP_RATE_UP
           )
-          if keep_coast and not long_active:
-            # Tip brake-cancel: ease to coast via existing VDAS, not a
-            # GAS_COMMAND DI rewrite. Planner / FCW a is ignored here.
-            accel_request = 0.0
+          if keep_enabled and not long_active:
+            # Tip brake-cancel: interpolate accel_request 0 → stock regen
+            # through existing VDAS (ENABLE=1). Not a GAS_COMMAND DI rewrite
+            # and not a coast plateau then RELEASE. Planner / FCW a is
+            # ignored here — effort is pinned to the ramp.
+            accel_request = self.brake_cancel.commanded_accel()
             in_engage_grace = False
-            accel_effort_limits = (0.0, 0.0)
+            accel_effort_limits = self.brake_cancel.accel_effort_limits()
           elif in_engage_grace:
             # Cap at grace_progress * engage_a_max so the ceiling is the
             # tuned accel-profile envelope, not the live MPC request.
@@ -395,7 +397,7 @@ class PreAPLongController:
           self.prev_pedal_di = self.vdas.update(
             accel_request, CS.out.vEgo, self.prev_pedal_di,
             a_ego=CS.out.aEgo,
-            freeze_integrator=in_engage_grace or (keep_coast and not long_active),
+            freeze_integrator=in_engage_grace or (keep_enabled and not long_active),
             orientation_ned=list(CC.orientationNED),
             accel_effort_limits=accel_effort_limits,
             pedal_ramp_rate_up=pedal_ramp_rate_up)
@@ -440,7 +442,7 @@ class PreAPLongController:
         self.regen_decel_monitor.reset()
 
       CS.pedal_authority_requested = authority_requested
-      CS.pedal_brake_cancel_coast = bool(keep_coast)
+      CS.pedal_brake_cancel_ramp = bool(keep_enabled)
       CS.pedal_authority_active = (
         self.pedal_authority.state == PedalAuthorityState.ACTIVE
         and not CS.engagement.pedal_unavailable
