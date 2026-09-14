@@ -377,10 +377,12 @@ class PreAPLongController:
             else PEDAL_RAMP_RATE_UP
           )
           if keep_enabled and not long_active:
-            # Tip brake-cancel: speed-target glide through existing VDAS
-            # (ENABLE=1). Not a GAS_COMMAND DI rewrite, not a coast
-            # plateau, and not the reverted 0.75 s 0→REGEN_MAX fade.
-            # Planner / FCW a is ignored here — effort is pinned.
+            # Tip brake-cancel: comfort-shaped regen ramp through
+            # existing VDAS (ENABLE=1). Gentle first (no frame-1 bite),
+            # stronger later. Not a GAS_COMMAND DI rewrite, not a coast
+            # plateau, not a constant-a step, and not the reverted
+            # 0.75 s 0→REGEN_MAX fade. Planner / FCW a is ignored —
+            # effort is pinned to the ramp.
             accel_request = self.brake_cancel.commanded_accel()
             in_engage_grace = False
             accel_effort_limits = self.brake_cancel.accel_effort_limits()

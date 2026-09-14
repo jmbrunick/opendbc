@@ -1,8 +1,8 @@
-"""Tip vs hold brake-cancel: speed-target glide, then stock.
+"""Tip vs hold brake-cancel: comfort-shaped regen ramp, then stock.
 
-A short/light cancel keeps interceptor ENABLE and commands a
-decelerating speed profile toward ~12 mph over ~2.5 s. Held / deeper
-brake RELEASEs immediately. Not the reverted 0.75 s 0→REGEN_MAX fade.
+A short/light cancel keeps interceptor ENABLE and ramps regen
+gentle → strong over ~2.5 s (no frame-1 bite). Held / deeper brake
+RELEASEs immediately. Not the reverted 0.75 s 0→REGEN_MAX fade.
 FCW / AEB / hard lead (long still on) and full session cancel are
 unchanged.
 """
@@ -14,6 +14,7 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.preap.brake_tip_glide import (
   BRAKE_CANCEL_FIRM_A_EGO,
   BRAKE_GLIDE_A_MIN,
+  BRAKE_GLIDE_A_START,
   BRAKE_GLIDE_DURATION_S,
   BRAKE_GLIDE_V_BAND_HI,
   BRAKE_GLIDE_V_BAND_LO,
@@ -21,8 +22,9 @@ from opendbc.car.tesla.preap.brake_tip_glide import (
   BRAKE_TIP_HOLD_S,
   BrakeTipGlide,
   BrakeTipGlideMode,
+  comfort_ramp_accel,
+  glide_end_accel,
   glide_speed_ref,
-  glide_target_accel,
 )
 from opendbc.car.tesla.preap.carcontroller import (
   ENGAGE_GRACE_FRAMES,
@@ -40,8 +42,8 @@ from opendbc.car.tesla.preap.tests.test_pedal_authority import (
 
 
 DT = 0.01
-V_GLIDE = 20.0 * CV.MPH_TO_MS  # can reach ~12 mph in 2.5 s within REGEN_MAX
-V_HIGH = 40.0 * CV.MPH_TO_MS   # cannot reach 10–15 in 2–3 s
+V_GLIDE = 20.0 * CV.MPH_TO_MS
+V_HIGH = 40.0 * CV.MPH_TO_MS
 
 
 def _step(fsm, **kwargs):
@@ -58,52 +60,76 @@ def _step(fsm, **kwargs):
   return fsm.update(**defaults)
 
 
-def test_glide_accel_is_speed_target_not_regen_fade():
-  a_20 = glide_target_accel(V_GLIDE)
-  a_40 = glide_target_accel(V_HIGH)
+def test_comfort_ramp_is_gentle_then_strong_not_a_step():
   assert 2.0 <= BRAKE_GLIDE_DURATION_S <= 3.0
   assert BRAKE_GLIDE_DURATION_S != pytest.approx(0.75)
   assert BRAKE_GLIDE_V_BAND_LO < BRAKE_GLIDE_V_TARGET < BRAKE_GLIDE_V_BAND_HI
-  assert BRAKE_GLIDE_V_TARGET == pytest.approx(12.0 * CV.MPH_TO_MS)
   assert BRAKE_GLIDE_A_MIN == pytest.approx(REGEN_MAX)
-  # 20 mph → 12 mph / 2.5 s is about −1.43, not a 0→−1.5 time fade.
-  assert a_20 == pytest.approx((BRAKE_GLIDE_V_TARGET - V_GLIDE) / BRAKE_GLIDE_DURATION_S)
-  assert BRAKE_GLIDE_A_MIN < a_20 < -0.5
-  # Highway: clip to interceptor regen — do not invent friction.
-  assert a_40 == pytest.approx(BRAKE_GLIDE_A_MIN)
-  # After the window at 40 mph we are still well above 15 mph.
+  assert BRAKE_GLIDE_A_MIN < BRAKE_GLIDE_A_START < -0.1
+
+  a_end_20 = glide_end_accel(V_GLIDE)
+  a_end_40 = glide_end_accel(V_HIGH)
+  # 20 / 40 mph cannot hit 12 mph with an ease-in to REGEN_MAX — same shape.
+  assert a_end_20 == pytest.approx(BRAKE_GLIDE_A_MIN)
+  assert a_end_40 == pytest.approx(BRAKE_GLIDE_A_MIN)
+
+  assert comfort_ramp_accel(0.0, a_end_20) == pytest.approx(BRAKE_GLIDE_A_START)
+  assert comfort_ramp_accel(0.0, a_end_20) > -0.5
+  # Mid is between start and end; late is fairly hard.
+  mid = comfort_ramp_accel(BRAKE_GLIDE_DURATION_S / 2, a_end_20)
+  late = comfort_ramp_accel(BRAKE_GLIDE_DURATION_S, a_end_20)
+  assert late < mid < BRAKE_GLIDE_A_START
+  assert late == pytest.approx(BRAKE_GLIDE_A_MIN)
+  # Not the reverted linear 0→−1.5 / 0.75 s fade.
+  at_075 = comfort_ramp_accel(0.75, a_end_20)
+  assert at_075 > BRAKE_GLIDE_A_MIN * 0.85
+
   v_after = glide_speed_ref(V_HIGH, BRAKE_GLIDE_DURATION_S)
   assert v_after > BRAKE_GLIDE_V_BAND_HI
-  assert glide_target_accel(BRAKE_GLIDE_V_TARGET) == pytest.approx(0.0)
 
 
-def test_short_brake_cancel_glides_then_releases():
+def test_near_band_end_accel_is_guided_by_speed_target():
+  v16 = 16.0 * CV.MPH_TO_MS
+  a_end = glide_end_accel(v16)
+  # Reachable-ish: a_end is at or only slightly milder than full regen.
+  assert a_end <= -1.0
+  assert a_end >= BRAKE_GLIDE_A_MIN - 1e-9
+  v_after = glide_speed_ref(v16, BRAKE_GLIDE_DURATION_S)
+  assert v_after <= 16.0 * CV.MPH_TO_MS
+  assert v_after + 1.0 >= BRAKE_GLIDE_V_TARGET
+
+
+def test_short_brake_cancel_ramps_then_releases():
   fsm = BrakeTipGlide()
   assert not _step(fsm, requested_long=True)
 
   assert _step(fsm, brake_pressed=True)
   assert fsm.mode == BrakeTipGlideMode.PENDING
-  assert fsm.commanded_accel() == pytest.approx(0.0)
+  # Tip cancel has started: noticeable but gentle. Not coast, not full.
+  assert fsm.commanded_accel() == pytest.approx(BRAKE_GLIDE_A_START, abs=0.05)
+  assert fsm.commanded_accel() > -0.5
+  assert fsm.commanded_accel() < -0.1
 
   for _ in range(10):  # 0.10 s tip
     assert _step(fsm, brake_pressed=True)
-    assert fsm.commanded_accel() == pytest.approx(0.0)
+    assert fsm.mode == BrakeTipGlideMode.PENDING
+    assert fsm.commanded_accel() > -0.5
 
   assert _step(fsm, brake_pressed=False)
   assert fsm.mode == BrakeTipGlideMode.GLIDE
-  expected_a = glide_target_accel(V_GLIDE)
-  assert fsm.commanded_accel() == pytest.approx(expected_a)
-  # Not the reverted fade: first glide frame is already the speed-derived a.
-  assert fsm.commanded_accel() != pytest.approx(0.0)
-  assert fsm.commanded_accel() > BRAKE_GLIDE_A_MIN + 0.02
+  first = fsm.commanded_accel()
+  assert first == pytest.approx(comfort_ramp_accel(fsm.glide_s, fsm.a_end))
+  assert first > BRAKE_GLIDE_A_MIN + 0.4
 
-  accels = [fsm.commanded_accel()]
+  accels = [first]
   while fsm.glide_s + DT + 1e-9 < BRAKE_GLIDE_DURATION_S:
     assert _step(fsm, brake_pressed=False, v_ego=V_GLIDE)
     assert fsm.mode == BrakeTipGlideMode.GLIDE
     accels.append(fsm.commanded_accel())
 
-  assert all(a == pytest.approx(expected_a) for a in accels)
+  assert accels[-1] < accels[len(accels) // 2] < accels[0]
+  assert accels[-1] <= BRAKE_GLIDE_A_MIN * 0.85
+  assert accels[0] > -0.5
   assert fsm.glide_s + DT + 1e-9 >= 2.0
   assert not _step(fsm, brake_pressed=False, v_ego=V_GLIDE)
   assert fsm.mode == BrakeTipGlideMode.IDLE
@@ -128,20 +154,23 @@ def test_already_in_band_releases_instead_of_gliding():
   _step(fsm, requested_long=True, v_ego=BRAKE_GLIDE_V_BAND_HI)
   assert _step(fsm, brake_pressed=True, v_ego=BRAKE_GLIDE_V_BAND_HI)
   assert fsm.mode == BrakeTipGlideMode.PENDING
+  assert fsm.commanded_accel() == pytest.approx(0.0)
   assert not _step(fsm, brake_pressed=False, v_ego=14.0 * CV.MPH_TO_MS)
   assert fsm.mode == BrakeTipGlideMode.IDLE
 
 
-def test_high_speed_uses_regen_max_then_hands_off():
+def test_high_speed_same_shape_then_hands_off():
   fsm = BrakeTipGlide()
   _step(fsm, requested_long=True, v_ego=V_HIGH)
   _step(fsm, brake_pressed=True, v_ego=V_HIGH)
+  assert fsm.commanded_accel() == pytest.approx(BRAKE_GLIDE_A_START, abs=0.05)
   assert _step(fsm, brake_pressed=False, v_ego=V_HIGH)
   assert fsm.mode == BrakeTipGlideMode.GLIDE
-  assert fsm.commanded_accel() == pytest.approx(BRAKE_GLIDE_A_MIN)
+  assert fsm.commanded_accel() > BRAKE_GLIDE_A_MIN + 0.4
 
   while fsm.glide_s + DT + 1e-9 < BRAKE_GLIDE_DURATION_S:
     assert _step(fsm, brake_pressed=False, v_ego=V_HIGH)
+  assert fsm.commanded_accel() == pytest.approx(BRAKE_GLIDE_A_MIN, abs=0.08)
   assert not _step(fsm, brake_pressed=False, v_ego=V_HIGH)
   assert fsm.mode == BrakeTipGlideMode.IDLE
 
@@ -274,7 +303,7 @@ def _step_controller(controller, cc, cs, tesla_can, frame):
   return controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
 
 
-def test_controller_short_cancel_glides_speed_target(controller_env):
+def test_controller_short_cancel_comfort_ramps(controller_env):
   controller, cc, cs, tesla_can = controller_env
   _activate_longitudinal(cc, cs)
   active = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
@@ -286,15 +315,18 @@ def test_controller_short_cancel_glides_speed_target(controller_env):
   assert _decode_pedal_command(tip[0]).enabled
   assert cs.pedal_brake_tip_glide
   assert cs.pedal_authority_action == int(PedalCommandAction.ENABLE)
-  assert controller.brake_cancel.commanded_accel() == pytest.approx(0.0)
+  # Frame 1 of the cancel is gentle — not stock, not REGEN_MAX.
+  assert controller.brake_cancel.commanded_accel() == pytest.approx(
+    BRAKE_GLIDE_A_START, abs=0.05,
+  )
+  assert controller.brake_cancel.commanded_accel() > -0.5
 
   cs.real_brake_pressed = False
   cs.out.aEgo = 0.0
-  cc.actuators.accel = -1.2  # stale planner must not punch the glide
+  cc.actuators.accel = -1.2  # stale planner must not punch the ramp
   accels = []
   pedal_di = []
-  # Every card frame (100 Hz). Odd frames do not TX but the FSM still advances.
-  for frame in range(3, 90):
+  for frame in range(3, 220):
     sent = _step_controller(controller, cc, cs, tesla_can, frame)
     if frame % 2:
       continue
@@ -303,14 +335,11 @@ def test_controller_short_cancel_glides_speed_target(controller_env):
     accels.append(controller.brake_cancel.commanded_accel())
     pedal_di.append(controller.prev_pedal_di)
 
-  expected_a = glide_target_accel(V_GLIDE)
-  assert accels[0] == pytest.approx(expected_a)
-  assert accels[-1] == pytest.approx(expected_a)
+  assert accels[0] > -0.5
+  assert accels[-1] < accels[0]
   assert accels[-1] < -0.5
-  assert accels[-1] > BRAKE_GLIDE_A_MIN + 0.02
   assert pedal_di[-1] < pedal_di[0]
   assert controller.vdas.prev_accel_effort < -0.05
-  # Still ENABLE well past the reverted 0.75 s fade.
   assert controller.brake_cancel.glide_s > 0.75
 
 
@@ -331,7 +360,6 @@ def test_controller_glide_releases_after_window(controller_env):
       continue
     if sent and not _decode_pedal_command(sent[0]).enabled:
       released = True
-      # ~2.5 s window, not the 0.75 s regen fade.
       assert frame * 0.01 >= 2.0
       break
     assert sent and _decode_pedal_command(sent[0]).enabled
