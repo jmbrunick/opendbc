@@ -5,12 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 from opendbc.car.tesla.preap.carcontroller import (
+  ENGAGE_GRACE_FRAMES,
   REGEN_DECEL_PROMPT_DWELL_UPDATES,
   PedalAuthority,
   PedalAuthorityState,
   PedalCommandAction,
   PreAPLongController,
   RegenDecelMonitor,
+  gas_lift_handoff_seed_accel,
 )
 from opendbc.car.tesla.preap.engagement import PreAPEngagement
 from opendbc.car.tesla.preap.nap_conf import PEDAL_DI_ZERO, PEDAL_MAX_VALUES
@@ -469,8 +471,10 @@ def test_active_pedal_releases_once_then_stays_silent(controller_env, override):
   assert _decode_pedal_command(active[0]).enabled
 
   if override == "brake":
+    # Deeper brake: stock regen immediately (not the tip-glide path).
     cs.enableLongControl = False
     cs.real_brake_pressed = True
+    cs.out.aEgo = -2.0
   else:
     cc.longActive = False
     cs.out.gasPressed = True
@@ -568,7 +572,8 @@ def test_engage_grace_starts_on_actual_long_active_rising(controller_env):
   cc.longActive = True
   controller.update(cc, cs, frame=460, tesla_can=tesla_can, can_bus_party=0)
 
-  assert controller.preap_long_engage_frame == 460
+  # Gas lift after long was already requested expires grace immediately.
+  assert (460 - controller.preap_long_engage_frame) >= ENGAGE_GRACE_FRAMES
 
 
 @pytest.mark.parametrize("engage_a_max", (0.8, 0.9, 1.0))
@@ -600,9 +605,13 @@ def test_non_timeout_gas_override_release_has_no_launch_for_1p5_seconds(
     current.command - previous.command
     for previous, current in zip(release_commands, release_commands[1:], strict=False)
   ]
-  assert release_commands[0].command < 0.1
+  expected_seed = min(1.618, engage_a_max)
   assert max(command_steps) < 1.0, command_steps
-  assert limited_acceleration_by_frame[508] < 0.4
+  # Grace is expired: do not sit at a=0 for 0.5 s. Seed is last non-neg aEgo,
+  # capped at MAX. Pedal DI still slews (mutation: handoff ramp must stay).
+  assert limited_acceleration_by_frame[460] == pytest.approx(expected_seed, abs=0.08)
+  assert limited_acceleration_by_frame[508] > 0.4
+  assert max(limited_acceleration_by_frame.values()) <= engage_a_max + 1e-6
   assert limited_acceleration_by_frame[610] == pytest.approx(cc.actuators.accel)
   assert not controller.preap_long_handoff_slew_active
 
@@ -635,10 +644,115 @@ def test_gas_override_timeout_rearm_has_no_launch(controller_env):
   assert len(first_enabled) == 1
   first_command = _decode_pedal_command(first_enabled[0])
   assert first_command.enabled
-  assert controller.preap_long_engage_frame == 464
+  assert (464 - controller.preap_long_engage_frame) >= ENGAGE_GRACE_FRAMES
   assert first_command.command < PEDAL_RAMP_RATE_UP - 1.0
-  assert controller.vdas.jerk_limiter.a_limited < 0.2
+  # Delayed ACQUIRE after gas lift still seeds last non-neg aEgo (1.618),
+  # capped by the personality MAX at 15 m/s (~0.9). Grade is preserved.
+  assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.9, abs=0.15)
   assert controller.vdas.grade_estimator.pitch_lp.x > 0.02
+
+
+def test_gas_lift_handoff_seed_uses_non_negative_aego():
+  assert gas_lift_handoff_seed_accel(0.62, -0.4, 0.8, 0.5) == pytest.approx(0.62)
+  assert gas_lift_handoff_seed_accel(-0.3, 0.41, 0.8, 0.5) == pytest.approx(0.5)
+  assert gas_lift_handoff_seed_accel(-0.3, -0.2, 0.8, 0.5) == pytest.approx(0.5)
+
+
+def test_gas_lift_handoff_seed_max_brake_and_lead_win():
+  assert gas_lift_handoff_seed_accel(1.618, 0.1, 0.8, 0.67) == pytest.approx(0.8)
+  assert gas_lift_handoff_seed_accel(0.62, 0.1, 0.8, -1.2) == pytest.approx(0.0)
+  assert gas_lift_handoff_seed_accel(0.62, 0.1, 0.8, float('nan')) == pytest.approx(0.0)
+
+
+def test_gas_lift_handoff_seed_uses_planner_climb_not_only_aego():
+  # Mannerisms Accel 1 / 5 / 10 comfort a (Normal lookahead): 0.36 / 0.80 / 1.60
+  assert gas_lift_handoff_seed_accel(0.08, 0.05, 0.8, 0.36) == pytest.approx(0.36)
+  assert gas_lift_handoff_seed_accel(0.08, 0.05, 0.8, 0.80) == pytest.approx(0.80)
+  assert gas_lift_handoff_seed_accel(0.08, 0.05, 0.8, 1.60) == pytest.approx(0.8)
+
+
+def test_engage_without_prior_gas_keeps_grace_floor(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+  cs.out.aEgo = 0.55
+  cc.actuators.accel = 0.67
+
+  controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+
+  assert controller.preap_long_engage_frame == 0
+  assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.0)
+  assert not controller.gas_long_handoff_pending
+
+
+def test_gas_lift_after_engaged_long_does_not_coast_for_grace(controller_env, monkeypatch):
+  controller, cc, cs, tesla_can = controller_env
+  monkeypatch.setattr(
+    'opendbc.car.tesla.preap.carcontroller.get_preap_accel_limits',
+    lambda _v_ego: (-1.5, 0.8),
+  )
+  _activate_longitudinal(cc, cs)
+  controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+  assert controller.preap_long_engage_frame == 0
+
+  cc.longActive = False
+  cs.out.gasPressed = True
+  cs.out.aEgo = 0.72
+  controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0)
+
+  cs.out.gasPressed = False
+  cs.out.aEgo = 0.08
+  cc.longActive = True
+  cc.actuators.accel = 0.55
+  controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0)
+
+  assert (4 - controller.preap_long_engage_frame) >= ENGAGE_GRACE_FRAMES
+  assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.72, abs=0.08)
+
+
+def test_gas_lift_lead_decel_passes_through_immediately(controller_env, monkeypatch):
+  controller, cc, cs, tesla_can = controller_env
+  monkeypatch.setattr(
+    'opendbc.car.tesla.preap.carcontroller.get_preap_accel_limits',
+    lambda _v_ego: (-1.5, 0.8),
+  )
+  _start_gas_override(cc, cs)
+  _hold_gas_override(controller, cc, cs, tesla_can)
+
+  cs.out.gasPressed = False
+  cs.out.aEgo = 0.1
+  cc.longActive = True
+  cc.actuators.accel = -1.2
+  controller.update(cc, cs, frame=460, tesla_can=tesla_can, can_bus_party=0)
+
+  assert (460 - controller.preap_long_engage_frame) >= ENGAGE_GRACE_FRAMES
+  assert controller.vdas.jerk_limiter.a_limited < 0.0
+
+
+def test_brake_after_gas_clears_handoff_so_resume_keeps_grace(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+  controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+
+  cs.out.gasPressed = True
+  cs.out.aEgo = 0.7
+  cc.longActive = False
+  controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0)
+  cs.out.gasPressed = False
+  cs.real_brake_pressed = True
+  cs.out.aEgo = -2.0
+  cs.enableLongControl = False
+  controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0)
+  assert not controller.gas_long_handoff_pending
+
+  cs.real_brake_pressed = False
+  cs.enableLongControl = True
+  cc.longActive = True
+  cs.out.aEgo = 0.2
+  cc.actuators.accel = 0.5
+  controller.update(cc, cs, frame=6, tesla_can=tesla_can, can_bus_party=0)
+
+  assert controller.preap_long_engage_frame == 6
+  assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.0)
 
 
 def test_zero_torque_anchor_converges_without_a_command_step():

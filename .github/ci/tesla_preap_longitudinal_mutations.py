@@ -48,9 +48,19 @@ MUTATIONS = (
     ),
   ),
   HistoricalMutation(
+    name="gas-lift-keeps-full-engage-grace",
+    source_path="opendbc/car/tesla/preap/carcontroller.py",
+    original=b"        if gas_handoff:\n",
+    replacement=b"        if False:\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_pedal_authority.py::" +
+      "test_gas_lift_after_engaged_long_does_not_coast_for_grace"
+    ),
+  ),
+  HistoricalMutation(
     name="measured-acceleration-command-seed",
     source_path="opendbc/car/tesla/preap/carcontroller.py",
-    original=b"          commanded_accel=0.0,\n",
+    original=b"          commanded_accel=commanded_accel,\n",
     replacement=b"          commanded_accel=CS.out.aEgo,\n",
     test_node=(
       "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +

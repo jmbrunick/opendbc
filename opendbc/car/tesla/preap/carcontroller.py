@@ -7,6 +7,7 @@ from opendbc.car import Bus
 from opendbc.car.tesla.preap.nap_conf import nap_conf
 from opendbc.car.tesla.preap.interface import get_preap_accel_limits
 from opendbc.car.tesla.pedal.controller import get_zero_torque, PEDAL_RAMP_RATE_UP
+from opendbc.car.tesla.preap.brake_tip_glide import BrakeTipGlide
 from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.values import CANBUS, CruiseButtons
@@ -25,6 +26,25 @@ def init_preap_can(dbc_names, packers):
 # positive accel on frame 1). Inspired by Tinkla's proportional ramp.
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
+
+
+def gas_lift_handoff_seed_accel(last_nonneg_a_ego, measured_accel, engage_a_max,
+                                planner_accel):
+  """Seed VDAS commanded accel after a gas→long handoff.
+
+  Open-road climb uses the planner request (Mannerisms Accel 1–10 toward
+  MAX) as well as last non-negative aEgo — not aEgo alone. Clamped to
+  [0, engage_a_max]. Lead hard decel / FCW / should-stop (planner < 0) win.
+  """
+  if not np.isfinite(planner_accel) or planner_accel < 0.0:
+    return 0.0
+  seed = 0.0
+  for candidate in (last_nonneg_a_ego, measured_accel, planner_accel):
+    if np.isfinite(candidate) and candidate >= 0.0:
+      seed = max(seed, float(candidate))
+  if not np.isfinite(engage_a_max) or engage_a_max <= 0.0:
+    return 0.0
+  return min(seed, float(engage_a_max))
 
 # The pedal controller updates at 50 Hz. Prompt when a sustained deceleration
 # request is not being delivered while the command is in the regen range.
@@ -191,9 +211,28 @@ class PreAPLongController:
     # ceiling for the grace-period ramp. Set fresh on each engage rising edge.
     self.engage_a_max = 0.0
     self.preap_long_handoff_slew_active = False
+    # Gas→long handoff: last non-negative aEgo while the driver was on the
+    # pedal, and a pending flag set on the falling edge. First engage without
+    # gas does not use these — it still gets the 0.5 s grace floor.
+    self.prev_gas_pressed = False
+    self.last_nonneg_a_ego = 0.0
+    self.gas_long_handoff_pending = False
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
+    self.brake_cancel = BrakeTipGlide()
+
+  def _update_gas_lift_handoff_state(self, requested_long, gas_pressed, brake_pressed, a_ego):
+    """Track gas falling edge / last non-negative aEgo while software long is up."""
+    if requested_long and gas_pressed and np.isfinite(a_ego) and a_ego >= 0.0:
+      self.last_nonneg_a_ego = float(a_ego)
+    if requested_long and self.prev_gas_pressed and not gas_pressed and not brake_pressed:
+      self.gas_long_handoff_pending = True
+    if (not requested_long) or brake_pressed:
+      self.gas_long_handoff_pending = False
+      if not requested_long:
+        self.last_nonneg_a_ego = 0.0
+    self.prev_gas_pressed = bool(gas_pressed)
 
   @staticmethod
   def _handle_pedal_unavailable(CS):
@@ -226,9 +265,21 @@ class PreAPLongController:
     pedal_factor = float(nap_conf.pedal_factor)
     pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
     pedal_long_allowed = use_pedal and pedal_transform_valid
+    gas_pressed = bool(getattr(CS.out, 'gasPressed', False))
+    brake_pressed = bool(getattr(CS, 'real_brake_pressed', False))
+    self._update_gas_lift_handoff_state(requested_long, gas_pressed, brake_pressed, CS.out.aEgo)
+    keep_enabled = self.brake_cancel.update(
+      requested_long=requested_long,
+      cruise_enabled=bool(CS.cruiseEnabled),
+      brake_pressed=brake_pressed,
+      gas_pressed=gas_pressed,
+      a_ego=float(CS.out.aEgo),
+      v_ego=float(CS.out.vEgo),
+      dt=0.01,
+    )
     if (not long_active
-        or getattr(CS, 'real_brake_pressed', False)
-        or getattr(CS.out, 'gasPressed', False)):
+        or brake_pressed
+        or gas_pressed):
       self.regen_decel_monitor.reset()
 
     requested_long_rising = (not self.prev_requested_long) and requested_long
@@ -255,23 +306,41 @@ class PreAPLongController:
     self.prev_requested_long = requested_long
 
     if frame % 2 == 0:
-      brake_pressed = getattr(CS, 'real_brake_pressed', False)
-      authority_requested = pedal_long_allowed and long_active and not brake_pressed and not CS.out.gasPressed
+      authority_requested = (
+        pedal_long_allowed
+        and not gas_pressed
+        and ((long_active and not brake_pressed) or keep_enabled)
+      )
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
       in_engage_grace = False
 
       if pedal_action == PedalCommandAction.ACQUIRE:
-        self.preap_long_engage_frame = frame
         self.preap_long_handoff_slew_active = True
         zero_torque_di = get_zero_torque().get(CS.out.vEgo)
         self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
+        _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
+        # Gas lift after software long was already requested: expire the
+        # 0.5 s a=0 floor so ACQUIRE does not sit in coast. First engage
+        # without prior gas still starts a fresh grace window.
+        gas_handoff = self.gas_long_handoff_pending
+        self.gas_long_handoff_pending = False
+        if gas_handoff:
+          self.preap_long_engage_frame = frame - ENGAGE_GRACE_FRAMES
+          commanded_accel = gas_lift_handoff_seed_accel(
+            self.last_nonneg_a_ego,
+            CS.out.aEgo,
+            self.engage_a_max,
+            float(actuators.accel),
+          )
+        else:
+          self.preap_long_engage_frame = frame
+          commanded_accel = 0.0
         self.vdas.reset(
           measured_accel=CS.out.aEgo,
-          commanded_accel=0.0,
+          commanded_accel=commanded_accel,
           pedal_di_init=self.prev_pedal_di,
           preserve_grade=True,
         )
-        _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
       if use_pedal and pedal_action not in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
         self.vdas.observe(CS.out.aEgo, list(CC.orientationNED))
@@ -307,7 +376,17 @@ class PreAPLongController:
             if self.preap_long_handoff_slew_active
             else PEDAL_RAMP_RATE_UP
           )
-          if in_engage_grace:
+          if keep_enabled and not long_active:
+            # Tip brake-cancel: comfort-shaped regen ramp through
+            # existing VDAS (ENABLE=1). Gentle first (no frame-1 bite),
+            # stronger later. Not a GAS_COMMAND DI rewrite, not a coast
+            # plateau, not a constant-a step, and not the reverted
+            # 0.75 s 0→REGEN_MAX fade. Planner / FCW a is ignored —
+            # effort is pinned to the ramp.
+            accel_request = self.brake_cancel.commanded_accel()
+            in_engage_grace = False
+            accel_effort_limits = self.brake_cancel.accel_effort_limits()
+          elif in_engage_grace:
             # Cap at grace_progress * engage_a_max so the ceiling is the
             # tuned accel-profile envelope, not the live MPC request.
             # Keeps an MPC outlier on engage from propagating through.
@@ -319,7 +398,8 @@ class PreAPLongController:
 
           self.prev_pedal_di = self.vdas.update(
             accel_request, CS.out.vEgo, self.prev_pedal_di,
-            a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
+            a_ego=CS.out.aEgo,
+            freeze_integrator=in_engage_grace or (keep_enabled and not long_active),
             orientation_ned=list(CC.orientationNED),
             accel_effort_limits=accel_effort_limits,
             pedal_ramp_rate_up=pedal_ramp_rate_up)
@@ -364,6 +444,7 @@ class PreAPLongController:
         self.regen_decel_monitor.reset()
 
       CS.pedal_authority_requested = authority_requested
+      CS.pedal_brake_tip_glide = bool(keep_enabled)
       CS.pedal_authority_active = (
         self.pedal_authority.state == PedalAuthorityState.ACTIVE
         and not CS.engagement.pedal_unavailable
