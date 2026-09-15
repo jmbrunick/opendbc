@@ -277,11 +277,13 @@ class PreAPLongController:
       v_ego=float(CS.out.vEgo),
       dt=0.01,
     )
-    # One-Pedal Long after a gas kick: software long is already off, so
-    # authority_requested stays false. Interceptor RELEASEs once (gas
-    # press) and stays RELEASED on lift — Tesla physical pedal / stock
-    # lift-regen. Do not re-ACQUIRE on lift (ENABLE 0↔1 chatter) and do
-    # not rewrite GAS_COMMAND DI while ENABLE=1.
+    # One-Pedal Long after a gas pause: software long is already off
+    # (same silent pause as brake), so authority_requested stays false.
+    # Interceptor RELEASEs once (gas press) and stays RELEASED on lift —
+    # Tesla physical pedal / stock lift-regen. Resume-long after pause
+    # is still one SET (sticky MAX), same as brake pause. Do not
+    # re-ACQUIRE on lift (ENABLE 0↔1 chatter) and do not rewrite
+    # GAS_COMMAND DI while ENABLE=1.
     if (not long_active
         or brake_pressed
         or gas_pressed):
