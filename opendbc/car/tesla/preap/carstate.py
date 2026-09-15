@@ -175,6 +175,7 @@ def update_preap(cs, can_parsers):
     cs.enableJustCC = cs.engagement.enableJustCC
     cs.pedal_speed_kph = cs.engagement.pedal_speed_kph
     cs.longCtrlEvent = cs.engagement.longCtrlEvent
+    cs.one_pedal_pause_latched = bool(cs.engagement._one_pedal_pause_latched)
 
   cs.das_control = None
   cs.cruise_enabled_prev = ret.cruiseState.enabled
