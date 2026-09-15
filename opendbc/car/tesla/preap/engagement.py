@@ -37,14 +37,25 @@ class PreAPEngagement:
     self.preap_brake_pressed_prev = False
     self.preap_gas_pressed_prev = False
     self._preap_one_pedal_long_was_on = False
-    # One-Pedal Long: gas-from-zero while long already on holds this
-    # until a stalk SET (or session teardown). Lift must not resume.
+    # One-Pedal Long: gas takeover while long was already holding
+    # (foot off) stays paused until a stalk SET. Lift must not resume.
     self._one_pedal_pause_latched = False
+    self._one_pedal_had_long_at_rest = False
+    self._one_pedal_long_on = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
 
   def _clear_one_pedal_pause_latch(self):
     self._one_pedal_pause_latched = False
+    self._one_pedal_had_long_at_rest = False
+
+  def latch_one_pedal_gas_takeover(self):
+    """Long was holding; driver took the pedal. Pause until SET."""
+    if self.cruiseEnabled:
+      if self.enableLongControl:
+        self._drop_longitudinal_keep_lateral()
+      self._one_pedal_pause_latched = True
+    return bool(self._one_pedal_pause_latched)
 
   def _drop_longitudinal_keep_lateral(self):
     was_long_active = self.enableLongControl
@@ -143,51 +154,69 @@ class PreAPEngagement:
     return button_events
 
   def maybe_one_pedal_gas_kick(self, gas_pressed, one_pedal_long):
-    """Rising gas from rest pauses software long when One-Pedal Long is On.
+    """Gas takeover while long was holding pauses until a stalk SET.
 
-    Only when long is **already on** and the accelerator rises from
-    zero — same function as brake today:
-    `_drop_longitudinal_keep_lateral` (enableLongControl off,
-    cruiseEnabled stays, lat stays). Not a full session cancel.
+    When long is **already holding with the foot off**, a later
+    accelerator press is a takeover: `_drop_longitudinal_keep_lateral`
+    (enableLongControl off, cruiseEnabled stays, lat stays) and latch
+    `_one_pedal_pause_latched`. Not a full session cancel.
 
-    After that gas-from-zero pause, **hold** `_one_pedal_pause_latched`
-    until a stalk SET (or session teardown). Lift must not restore
-    long / re-ACQUIRE. Brake pause does not set this latch.
+    `_one_pedal_had_long_at_rest` is sticky: any gas after that rest
+    latches, not only a single interceptor rising edge. Soft / late
+    `gasPressed` samples and a missed edge still pause. Lift / coast /
+    regen must not restore long / re-ACQUIRE. Brake pause does not set
+    this latch.
 
     Engage-while-gas-pressed (one or two SET pulls with the foot already
-    down) must not pause. Long stays armed so lift still runs the stock
-    A+B grace expire + aEgo / A3 climb handoff. Same-frame SET + first
-    gas sample is engage-with-gas, not a from-rest kick. Do not pause a
-    standstill wait-for-gas resume or a SET that just restored long.
-    Toggle Off: gas stays OVERRIDE (`enableLongControl` remains true).
+    down) never sets `_one_pedal_had_long_at_rest`, so lift still runs
+    A+B / A3. Same-frame SET + first gas sample is engage-with-gas.
+    Do not pause a standstill wait-for-gas resume or a SET that just
+    restored long. Toggle Off: gas stays OVERRIDE (`enableLongControl`
+    remains true).
     """
-    gas_rising = bool(gas_pressed) and not bool(self.preap_gas_pressed_prev)
-    self.preap_gas_pressed_prev = bool(gas_pressed)
+    gas_pressed = bool(gas_pressed)
+    one_pedal_long = bool(one_pedal_long)
+    self._one_pedal_long_on = one_pedal_long
+    gas_rising = gas_pressed and not bool(self.preap_gas_pressed_prev)
+    self.preap_gas_pressed_prev = gas_pressed
     long_already_on = bool(getattr(self, "_preap_one_pedal_long_was_on", False))
     paused = False
-    skip_resume = getattr(self, "_nap_set_resume_long", False) or getattr(
-      self, "_nap_resume_wait_gas", False)
-    latched = bool(getattr(self, "_one_pedal_pause_latched", False))
+    skip_resume = bool(getattr(self, "_nap_set_resume_long", False) or getattr(
+      self, "_nap_resume_wait_gas", False))
 
-    if skip_resume or not self.cruiseEnabled or not one_pedal_long:
-      # SET / wait-gas / session down / toggle Off: stop holding.
-      # SET is the intended resume; wait-gas is standstill SET.
+    if not self.cruiseEnabled or not one_pedal_long:
+      # Session down / toggle Off: stop holding.
       self._clear_one_pedal_pause_latch()
-      latched = False
+      self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
+      return False
 
-    if (one_pedal_long and not skip_resume
-        and gas_rising and long_already_on
-        and self.cruiseEnabled and self.enableLongControl):
-      carlog.debug("ONE-PEDAL LONG — gas from rest pausing longitudinal")
-      self._drop_longitudinal_keep_lateral()
-      self._one_pedal_pause_latched = True
-      paused = True
-    elif (one_pedal_long and latched and self.cruiseEnabled and not skip_resume):
+    if skip_resume:
+      # SET / wait-gas is the intended resume. Clear latch only here,
+      # not on a later lift frame. SET-while-gas must not immediately
+      # re-latch (treat like engage-with-gas until the foot is off).
+      self._clear_one_pedal_pause_latch()
+      self._one_pedal_had_long_at_rest = bool(
+        self.enableLongControl and not gas_pressed)
+      self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
+      return False
+
+    if self.enableLongControl and not gas_pressed:
+      self._one_pedal_had_long_at_rest = True
+
+    takeover = gas_pressed and (
+      bool(self._one_pedal_had_long_at_rest)
+      or (gas_rising and long_already_on and self.enableLongControl)
+    )
+    if takeover:
+      was_long = bool(self.enableLongControl)
+      carlog.debug("ONE-PEDAL LONG — gas takeover pausing longitudinal")
+      self.latch_one_pedal_gas_takeover()
+      paused = was_long
+    elif self._one_pedal_pause_latched and self.enableLongControl:
       # Held pause: if anything restored long without SET, drop it again.
-      if self.enableLongControl:
-        carlog.debug("ONE-PEDAL LONG — holding gas-pause until SET")
-        self._drop_longitudinal_keep_lateral()
-        paused = True
+      carlog.debug("ONE-PEDAL LONG — holding gas-pause until SET")
+      self._drop_longitudinal_keep_lateral()
+      paused = True
 
     self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
     return paused

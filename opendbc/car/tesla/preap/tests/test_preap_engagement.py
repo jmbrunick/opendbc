@@ -395,6 +395,39 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertTrue(eng._one_pedal_pause_latched)
     self.assertTrue(eng.cruiseEnabled)
 
+  def test_soft_or_late_gas_still_latches_after_long_at_rest(self):
+    """Sticky at-rest bit: gas after long was holding latches even if
+    `_preap_one_pedal_long_was_on` is false (missed rising edge)."""
+    eng = self._long_at_rest(self._engaged())
+    self.assertTrue(eng._one_pedal_had_long_at_rest)
+    eng._preap_one_pedal_long_was_on = False
+    self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng._one_pedal_pause_latched)
+    self.assertFalse(eng.enableLongControl)
+    for _ in range(8):
+      self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+      self.assertFalse(eng.enableLongControl)
+      self.assertTrue(eng._one_pedal_pause_latched)
+
+  def test_lift_keeps_enable_long_false_until_set(self):
+    """Road-test contract: long on → gas → lift → long stays off until SET."""
+    eng = self._long_at_rest(self._engaged())
+    self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertFalse(eng.enableLongControl)
+    for _ in range(12):
+      self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+      self.assertFalse(eng.enableLongControl)
+      self.assertTrue(eng._one_pedal_pause_latched)
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=5000, v_ego=22.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertFalse(eng._one_pedal_pause_latched)
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertTrue(eng.enableLongControl)
+
   def test_brake_pause_does_not_set_one_pedal_latch(self):
     """Brake path stays as today: no One-Pedal SET latch."""
     eng = self._engaged()
