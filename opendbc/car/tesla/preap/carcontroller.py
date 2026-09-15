@@ -260,6 +260,14 @@ class PreAPLongController:
     actuators = CC.actuators
 
     requested_long = CS.cruiseEnabled and CS.enableLongControl
+    one_pedal_pause = bool(
+      getattr(getattr(CS, 'engagement', None), '_one_pedal_pause_latched', False)
+      or getattr(CS, 'one_pedal_pause_latched', False)
+    )
+    # Held One-Pedal gas-pause: do not command long until SET clears the
+    # latch, even if enableLongControl / CC.longActive glitch true on lift.
+    if one_pedal_pause:
+      requested_long = False
     long_active = requested_long and CC.longActive
     use_pedal = nap_conf.use_pedal
     pedal_factor = float(nap_conf.pedal_factor)
@@ -277,13 +285,13 @@ class PreAPLongController:
       v_ego=float(CS.out.vEgo),
       dt=0.01,
     )
-    # One-Pedal Long after a gas pause: software long is already off
-    # (same silent pause as brake), so authority_requested stays false.
-    # Interceptor RELEASEs once (gas press) and stays RELEASED on lift —
-    # Tesla physical pedal / stock lift-regen. Resume-long after pause
-    # is still one SET (sticky MAX), same as brake pause. Do not
-    # re-ACQUIRE on lift (ENABLE 0↔1 chatter) and do not rewrite
-    # GAS_COMMAND DI while ENABLE=1.
+    # One-Pedal Long after a gas pause: `_one_pedal_pause_latched` holds
+    # until SET. Software long stays off (same silent pause as brake),
+    # so authority_requested stays false. Interceptor RELEASEs once (gas
+    # press) and stays RELEASED on lift — Tesla physical pedal / stock
+    # lift-regen. Do not re-ACQUIRE on lift (ENABLE 0↔1 chatter) and do
+    # not rewrite GAS_COMMAND DI while ENABLE=1. Brake pause does not
+    # use this latch.
     if (not long_active
         or brake_pressed
         or gas_pressed):

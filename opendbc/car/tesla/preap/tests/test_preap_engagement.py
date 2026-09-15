@@ -358,9 +358,69 @@ class TestOnePedalLongGasKick(unittest.TestCase):
   def test_lift_does_not_restore_long(self):
     eng = self._long_at_rest(self._engaged())
     eng.maybe_one_pedal_gas_kick(True, True)
+    self.assertTrue(getattr(eng, "_one_pedal_pause_latched", False))
     self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
     self.assertTrue(eng.cruiseEnabled)
     self.assertFalse(eng.enableLongControl)
+    self.assertTrue(eng._one_pedal_pause_latched)
+
+  def test_gas_pause_latch_holds_until_set(self):
+    """Lift keeps the pause; one SET clears the latch and restores long."""
+    eng = self._long_at_rest(self._engaged())
+    self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng._one_pedal_pause_latched)
+    eng.maybe_one_pedal_gas_kick(False, True)
+    self.assertFalse(eng.enableLongControl)
+    self.assertTrue(eng._one_pedal_pause_latched)
+
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=4000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertFalse(eng._one_pedal_pause_latched)
+    self.assertTrue(eng.enableLongControl)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertTrue(eng.enableLongControl)
+
+  def test_latch_re_drops_long_without_set(self):
+    """If long comes back without SET, the held latch drops it again."""
+    eng = self._long_at_rest(self._engaged())
+    eng.maybe_one_pedal_gas_kick(True, True)
+    eng.maybe_one_pedal_gas_kick(False, True)
+    eng.enableLongControl = True
+    self.assertTrue(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertFalse(eng.enableLongControl)
+    self.assertTrue(eng._one_pedal_pause_latched)
+    self.assertTrue(eng.cruiseEnabled)
+
+  def test_brake_pause_does_not_set_one_pedal_latch(self):
+    """Brake path stays as today: no One-Pedal SET latch."""
+    eng = self._engaged()
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=0,
+      curr_time_ms=2000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=True)
+    self.assertFalse(eng.enableLongControl)
+    self.assertFalse(getattr(eng, "_one_pedal_pause_latched", False))
+    self.assertTrue(eng.cruiseEnabled)
+
+  def test_engage_while_gas_does_not_latch(self):
+    eng = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertFalse(getattr(eng, "_one_pedal_pause_latched", False))
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(eng._one_pedal_pause_latched)
 
   def test_standstill_wait_gas_is_not_kicked(self):
     eng = self._engaged()

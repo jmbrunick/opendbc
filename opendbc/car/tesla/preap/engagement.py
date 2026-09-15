@@ -37,8 +37,14 @@ class PreAPEngagement:
     self.preap_brake_pressed_prev = False
     self.preap_gas_pressed_prev = False
     self._preap_one_pedal_long_was_on = False
+    # One-Pedal Long: gas-from-zero while long already on holds this
+    # until a stalk SET (or session teardown). Lift must not resume.
+    self._one_pedal_pause_latched = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
+
+  def _clear_one_pedal_pause_latch(self):
+    self._one_pedal_pause_latched = False
 
   def _drop_longitudinal_keep_lateral(self):
     was_long_active = self.enableLongControl
@@ -71,6 +77,7 @@ class PreAPEngagement:
       self.prev_stalk_pull_time_ms = -1000
       self.pending_cancel_at_ms = 0
       self._clear_pedal_unavailable()
+      self._clear_one_pedal_pause_latch()
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
     self.prev_steering_disengage = steering_disengage
@@ -87,8 +94,10 @@ class PreAPEngagement:
     self.preap_cc_cancel_needed = False
     self.preap_cc_engage_needed = False
 
-    # MAIN button: rising edge only
+    # MAIN button: rising edge only. One SET clears a One-Pedal gas-pause
+    # latch so long can come back; lift alone must not.
     if cruise_buttons == CruiseButtons.MAIN and prev_cruise_buttons != CruiseButtons.MAIN:
+      self._clear_one_pedal_pause_latch()
       carlog.debug("STALK MAIN | cruiseEnabled=%s enableLong=%s pending=%s pedal=%s doublePull=%s",
                    self.cruiseEnabled, self.enableLongControl, self.pending_enable,
                    use_pedal, self.enableDoublePull)
@@ -141,6 +150,10 @@ class PreAPEngagement:
     `_drop_longitudinal_keep_lateral` (enableLongControl off,
     cruiseEnabled stays, lat stays). Not a full session cancel.
 
+    After that gas-from-zero pause, **hold** `_one_pedal_pause_latched`
+    until a stalk SET (or session teardown). Lift must not restore
+    long / re-ACQUIRE. Brake pause does not set this latch.
+
     Engage-while-gas-pressed (one or two SET pulls with the foot already
     down) must not pause. Long stays armed so lift still runs the stock
     A+B grace expire + aEgo / A3 climb handoff. Same-frame SET + first
@@ -154,12 +167,28 @@ class PreAPEngagement:
     paused = False
     skip_resume = getattr(self, "_nap_set_resume_long", False) or getattr(
       self, "_nap_resume_wait_gas", False)
+    latched = bool(getattr(self, "_one_pedal_pause_latched", False))
+
+    if skip_resume or not self.cruiseEnabled or not one_pedal_long:
+      # SET / wait-gas / session down / toggle Off: stop holding.
+      # SET is the intended resume; wait-gas is standstill SET.
+      self._clear_one_pedal_pause_latch()
+      latched = False
+
     if (one_pedal_long and not skip_resume
         and gas_rising and long_already_on
         and self.cruiseEnabled and self.enableLongControl):
       carlog.debug("ONE-PEDAL LONG — gas from rest pausing longitudinal")
       self._drop_longitudinal_keep_lateral()
+      self._one_pedal_pause_latched = True
       paused = True
+    elif (one_pedal_long and latched and self.cruiseEnabled and not skip_resume):
+      # Held pause: if anything restored long without SET, drop it again.
+      if self.enableLongControl:
+        carlog.debug("ONE-PEDAL LONG — holding gas-pause until SET")
+        self._drop_longitudinal_keep_lateral()
+        paused = True
+
     self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
     return paused
 
@@ -174,6 +203,7 @@ class PreAPEngagement:
       self.enableJustCC = False
       self.pending_enable = False
       self._clear_pedal_unavailable()
+      self._clear_one_pedal_pause_latch()
     return can_engage
 
   def _handle_double_pull(self, curr_time_ms, v_ego, speed_units,
@@ -257,6 +287,7 @@ class PreAPEngagement:
         self.prev_stalk_pull_time_ms = -1000
         self.pending_cancel_at_ms = 0
         self._clear_pedal_unavailable()
+        self._clear_one_pedal_pause_latch()
         if was_long_active:
           self.longCtrlEvent = "pccDisabled"
       else:
