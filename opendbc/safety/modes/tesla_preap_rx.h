@@ -96,7 +96,8 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   }
 
   // DI brake closes the interval before the slower BrakeMessage arrives.
-  // Leaving Drive (and returning to Drive) re-arms via pcm_cruise_check(false).
+  // Out of Drive: re-arm via pcm_cruise_check(false) so the latch is
+  // gone before Drive return. Drive entry is not the primary re-arm.
   if (msg->addr == 0x118U) {
     preap_di_brake_pressed = ((msg->data[1] >> 7) & 0x01U) != 0U;
     preap_gear = (msg->data[1] >> 4) & 0x07;
@@ -104,22 +105,15 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     preap_di_brake_ts = microsecond_timer_get();
     preap_gear_seen = true;
     preap_gear_ts = preap_di_brake_ts;
-    // R/P/N must leave the same clean PCM state as a real stalk disable:
-    // controls_allowed=false AND cruise_engaged_prev=false. Setting
-    // controls_allowed=false alone leaves the latch set, so the next Drive
-    // SET is not a rising edge: selfdrived enables, panda does not,
-    // controlsMismatch after ~2s.
-    //
-    // Python hard_cancel_session spoofs CANCEL on 0x45 TX. Panda does not
-    // RX its own TX, so that spoof cannot clear the latch — only a real
-    // stalk cancel on RX can, which is why Justin could recover with an
-    // extra stalk disable→enable after returning to Drive. Pulse false on
-    // every non-Drive 0x118 and again on the Drive rising edge so that
-    // extra cycle is not required.
+    // R/P/N: same clean PCM state as a real stalk disable, *while not in
+    // Drive*. controls_allowed=false AND cruise_engaged_prev=false so the
+    // latch is already gone before Drive return. Do not use Drive entry as
+    // the primary re-arm. Setting controls_allowed=false alone left the
+    // latch set, so a later Drive SET was not a rising edge (mismatch).
+    // Python CANCEL spoof is TX-only and cannot clear this RX latch.
     if (preap_gear != 4) {
       pcm_cruise_check(false);
-    } else if (preap_gear_prev != 4) {
-      pcm_cruise_check(false);
+      preap_last_stalk_engage_us = 0U;
     }
     preap_gear_prev = preap_gear;
   }
@@ -149,9 +143,9 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     preap_update_stalk((int)(msg->data[2] & 0x03U));
     if (lever == 2) {  // RWD = pull toward driver = enable
       if ((preap_gear == 4) && !preap_doors_open) {
-        // Drive SET while !controls_allowed must match stalk cancel→SET.
-        // Leftover cruise_engaged_prev (TX-only CANCEL spoof, or a drop
-        // that only cleared controls_allowed) is not a rising edge.
+        // Last-resort only: leftover cruise_engaged_prev after a TX-only
+        // CANCEL spoof. Primary re-arm is pcm_cruise_check(false) while
+        // not in Drive. In-Drive SET is otherwise a normal rising edge.
         if (!controls_allowed) {
           pcm_cruise_check(false);
         }
