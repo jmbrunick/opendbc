@@ -133,13 +133,16 @@ class PreAPEngagement:
     return button_events
 
   def maybe_one_pedal_gas_kick(self, gas_pressed, one_pedal_long):
-    """Rising gas from rest drops software long when One-Pedal Long is On.
+    """Rising gas from rest pauses software long when One-Pedal Long is On.
 
-    Same silent pause as brake (`_drop_longitudinal_keep_lateral`). Call
-    after interceptor `gasPressed` is published so DI_pedalPos (the
-    interceptor command while ENABLE=1) cannot false-trigger. Do not kick
-    a standstill wait-for-gas resume or a SET that just restored long.
-    Toggle Off: gas stays OVERRIDE (`enableLongControl` remains true).
+    Same function as brake today: `_drop_longitudinal_keep_lateral`
+    (enableLongControl off, cruiseEnabled stays, lat stays). Not a
+    full session cancel — do not USER_DISABLE / hard_cancel_session /
+    take-control. Call after interceptor `gasPressed` is published so
+    DI_pedalPos (the interceptor command while ENABLE=1) cannot
+    false-trigger. Do not pause a standstill wait-for-gas resume or a
+    SET that just restored long. Toggle Off: gas stays OVERRIDE
+    (`enableLongControl` remains true).
     """
     gas_rising = bool(gas_pressed) and not bool(self.preap_gas_pressed_prev)
     self.preap_gas_pressed_prev = bool(gas_pressed)
@@ -150,7 +153,7 @@ class PreAPEngagement:
     if getattr(self, "_nap_resume_wait_gas", False):
       return False
     if gas_rising and self.cruiseEnabled and self.enableLongControl:
-      carlog.debug("ONE-PEDAL LONG — gas from rest dropping longitudinal")
+      carlog.debug("ONE-PEDAL LONG — gas from rest pausing longitudinal")
       self._drop_longitudinal_keep_lateral()
       return True
     return False

@@ -170,7 +170,7 @@ def update_preap(cs, can_parsers):
     ret.gasPressed = cs.pedal.gas_pressed
     cs.engagement.maybe_one_pedal_gas_kick(
       bool(ret.gasPressed), bool(nap_conf.one_pedal_long))
-    # Kick may have dropped long; re-bridge so carcontroller sees it.
+    # Gas pause may have released long; re-bridge so carcontroller sees it.
     cs.enableLongControl = cs.engagement.enableLongControl
     cs.enableJustCC = cs.engagement.enableJustCC
     cs.pedal_speed_kph = cs.engagement.pedal_speed_kph
