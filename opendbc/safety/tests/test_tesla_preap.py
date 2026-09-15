@@ -303,27 +303,26 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
 
-  def test_drive_return_clears_leftover_latch_without_stalk_cancel(self):
-    """R/P→Drive must match stalk disable: leftover cruise_engaged_prev dies.
-
-    Justin: after Drive, re-engage still mismatched until a real stalk
-    cancel→SET. Python CANCEL spoof is TX-only and never hits this RX path.
+  def test_leftover_latch_clears_while_still_in_reverse(self):
+    """Primary re-arm is while NOT in Drive. Leftover cruise_engaged_prev
+    must die on a later Reverse 0x118, before Drive return.
     """
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._gear_msg(2))  # Reverse
-    # Old bug: drop allowed, leave the PCM latch. TX-only CANCEL would
-    # not have cleared it either (panda does not RX its own TX).
     self.safety.set_controls_allowed(False)
     self.safety.set_cruise_engaged_prev(True)
-    self._rx(self._gear_msg(4))  # Drive — no RX CANCEL
+    self._rx(self._gear_msg(2))  # still Reverse — latch must clear here
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._gear_msg(4))  # Drive — not the primary clear
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_cruise_engaged_prev())
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
 
   def test_drive_set_rearms_leftover_latch_without_extra_cancel(self):
-    """Drive SET while !allowed is cancel-then-SET. No extra stalk cycle."""
+    """Last-resort: Drive SET while !allowed is cancel-then-SET."""
     self._rx(self._pcm_status_msg(True))
     self.safety.set_controls_allowed(False)
     self.safety.set_cruise_engaged_prev(True)

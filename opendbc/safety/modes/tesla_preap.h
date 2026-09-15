@@ -45,10 +45,9 @@
 //     ALC keep-alive flashes and hazards are not a driver turn.
 //   - Disengage on EPAS error codes 6-9, except during that same turn
 //   - Disengage on door open, gear out of Drive via pcm_cruise_check(false)
-//     (also on the Drive rising edge) so cruise_engaged_prev clears.
-//     Python CANCEL spoof is TX-only and cannot clear that latch; a real
-//     stalk cancel on RX can. Drive SET while !controls_allowed pulses
-//     false then true so R/P→Drive does not need an extra stalk cycle.
+//     *while not in Drive* so cruise_engaged_prev is already clear before
+//     Drive return. Python CANCEL spoof is TX-only and cannot clear that
+//     latch. Drive SET while !controls_allowed is last-resort only.
 //   - Disengage on stalk cancel (with 600ms echo filter). TX CANCEL while
 //     already !controls_allowed also clears the latch (spoof path).
 //   - AEB events blocked from openpilot
