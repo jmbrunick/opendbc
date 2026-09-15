@@ -304,6 +304,12 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertTrue(eng.enableLongControl)
     return eng
 
+  def _long_at_rest(self, eng, one_pedal=True):
+    """One frame with long already on and foot off — required before a pause."""
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, one_pedal))
+    self.assertTrue(eng.enableLongControl)
+    return eng
+
   def test_toggle_off_gas_does_not_drop_long(self):
     eng = self._engaged()
     self.assertFalse(eng.maybe_one_pedal_gas_kick(True, False))
@@ -311,7 +317,7 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertTrue(eng.enableLongControl)
 
   def test_rising_gas_pauses_long_keeps_lat(self):
-    eng = self._engaged()
+    eng = self._long_at_rest(self._engaged())
     self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
     self.assertTrue(eng.cruiseEnabled)
     self.assertFalse(eng.enableLongControl)
@@ -319,7 +325,7 @@ class TestOnePedalLongGasKick(unittest.TestCase):
 
   def test_gas_pause_matches_brake_silent_pause(self):
     """Gas-from-rest must be the brake long-pause, not a full disable."""
-    gas = self._engaged()
+    gas = self._long_at_rest(self._engaged())
     brake = self._engaged()
     brake.process_buttons(
       cruise_buttons=0, prev_cruise_buttons=0,
@@ -335,7 +341,7 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertTrue(gas.enableJustCC)
 
   def test_gas_pause_is_not_hard_cancel(self):
-    eng = self._engaged()
+    eng = self._long_at_rest(self._engaged())
     eng.maybe_one_pedal_gas_kick(True, True)
     self.assertTrue(eng.cruiseEnabled)
     self.assertFalse(eng.enableLongControl)
@@ -343,14 +349,14 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertFalse(getattr(eng, "preap_cc_cancel_needed", False))
 
   def test_held_gas_is_not_a_second_kick(self):
-    eng = self._engaged()
+    eng = self._long_at_rest(self._engaged())
     self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
     self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
     self.assertFalse(eng.enableLongControl)
     self.assertTrue(eng.cruiseEnabled)
 
   def test_lift_does_not_restore_long(self):
-    eng = self._engaged()
+    eng = self._long_at_rest(self._engaged())
     eng.maybe_one_pedal_gas_kick(True, True)
     self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
     self.assertTrue(eng.cruiseEnabled)
@@ -368,6 +374,53 @@ class TestOnePedalLongGasKick(unittest.TestCase):
   def test_just_resumed_set_is_not_kicked(self):
     eng = self._engaged()
     eng._nap_set_resume_long = True
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng.enableLongControl)
+    self.assertTrue(eng.cruiseEnabled)
+
+  def test_single_pull_while_gas_held_does_not_pause(self):
+    """Foot on gas + one SET: long arms; lift must not pause (A+B handoff)."""
+    eng = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng.enableLongControl)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertTrue(eng.enableLongControl)
+    self.assertTrue(eng.cruiseEnabled)
+
+  def test_double_pull_while_gas_held_does_not_pause(self):
+    """Foot on gas + two SET pulls: long arms on second pull; lift keeps long."""
+    eng = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=750)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1400, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertTrue(eng.enableLongControl)
+
+  def test_same_frame_set_and_gas_rising_does_not_pause(self):
+    """SET engage then first gas sample this cycle is engage-with-gas, not a kick."""
+    eng = self._engaged()
     self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
     self.assertTrue(eng.enableLongControl)
     self.assertTrue(eng.cruiseEnabled)
