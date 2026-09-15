@@ -35,6 +35,7 @@ class PreAPEngagement:
     self.pending_cancel_at_ms = 0
 
     self.preap_brake_pressed_prev = False
+    self.preap_gas_pressed_prev = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
 
@@ -130,6 +131,29 @@ class PreAPEngagement:
     self.preap_brake_pressed_prev = real_brake_pressed
 
     return button_events
+
+  def maybe_one_pedal_gas_kick(self, gas_pressed, one_pedal_long):
+    """Rising gas from rest drops software long when One-Pedal Long is On.
+
+    Same silent pause as brake (`_drop_longitudinal_keep_lateral`). Call
+    after interceptor `gasPressed` is published so DI_pedalPos (the
+    interceptor command while ENABLE=1) cannot false-trigger. Do not kick
+    a standstill wait-for-gas resume or a SET that just restored long.
+    Toggle Off: gas stays OVERRIDE (`enableLongControl` remains true).
+    """
+    gas_rising = bool(gas_pressed) and not bool(self.preap_gas_pressed_prev)
+    self.preap_gas_pressed_prev = bool(gas_pressed)
+    if not one_pedal_long:
+      return False
+    if getattr(self, "_nap_set_resume_long", False):
+      return False
+    if getattr(self, "_nap_resume_wait_gas", False):
+      return False
+    if gas_rising and self.cruiseEnabled and self.enableLongControl:
+      carlog.debug("ONE-PEDAL LONG — gas from rest dropping longitudinal")
+      self._drop_longitudinal_keep_lateral()
+      return True
+    return False
 
   def check_can_engage(self, door_open, gear_shifter, seatbelt_unlatched):
     """Check engagement prerequisites. Resets state if blocked."""

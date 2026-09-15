@@ -22,6 +22,7 @@ CONFIG_FILE = "/data/nap_params.json"
 DEFAULT_CONFIG = {
   'double_pull_window_ms': 400,
   'use_pedal': False,
+  'one_pedal_long': False,
   'pedal_calibrated': False,
   'accel_profile': 'Chill',
   'pedal_can_zero': False,
@@ -193,6 +194,11 @@ class NAPConf:
     self._put(json_key, text)
 
   # Bool properties
+
+  @property
+  def one_pedal_long(self):
+    """Mannerisms One-Pedal Long. Default Off. Missing / test double → Off."""
+    return self._get_param_bool(NAPParamKeys.ONE_PEDAL_LONG, 'one_pedal_long', False)
 
   @property
   def use_pedal(self):

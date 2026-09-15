@@ -286,5 +286,70 @@ class TestNoPedalUpDownPassthrough(unittest.TestCase):
     self.assertEqual(eng.pedal_speed_kph, 0.0)
 
 
+class TestOnePedalLongGasKick(unittest.TestCase):
+  """Gas rising from rest drops long when One-Pedal Long is On."""
+
+  def _engaged(self):
+    eng = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertTrue(eng.enableLongControl)
+    return eng
+
+  def test_toggle_off_gas_does_not_drop_long(self):
+    eng = self._engaged()
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, False))
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertTrue(eng.enableLongControl)
+
+  def test_rising_gas_kicks_long_keeps_lat(self):
+    eng = self._engaged()
+    self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+    self.assertTrue(eng.enableJustCC)
+
+  def test_held_gas_is_not_a_second_kick(self):
+    eng = self._engaged()
+    self.assertTrue(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertFalse(eng.enableLongControl)
+
+  def test_lift_does_not_restore_long(self):
+    eng = self._engaged()
+    eng.maybe_one_pedal_gas_kick(True, True)
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(False, True))
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+
+  def test_standstill_wait_gas_is_not_kicked(self):
+    eng = self._engaged()
+    eng.enableLongControl = False
+    eng.enableJustCC = True
+    eng._nap_resume_wait_gas = True
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertFalse(eng.enableLongControl)
+
+  def test_just_resumed_set_is_not_kicked(self):
+    eng = self._engaged()
+    eng._nap_set_resume_long = True
+    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+    self.assertTrue(eng.enableLongControl)
+
+  def test_brake_still_drops_long_with_toggle_on(self):
+    eng = self._engaged()
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=0,
+      curr_time_ms=2000, v_ego=15.0, speed_units="KPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=True)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+
+
 if __name__ == "__main__":
   unittest.main()
