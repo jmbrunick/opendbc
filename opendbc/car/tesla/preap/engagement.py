@@ -36,6 +36,7 @@ class PreAPEngagement:
 
     self.preap_brake_pressed_prev = False
     self.preap_gas_pressed_prev = False
+    self._preap_one_pedal_long_was_on = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
 
@@ -135,28 +136,32 @@ class PreAPEngagement:
   def maybe_one_pedal_gas_kick(self, gas_pressed, one_pedal_long):
     """Rising gas from rest pauses software long when One-Pedal Long is On.
 
-    Same function as brake today: `_drop_longitudinal_keep_lateral`
-    (enableLongControl off, cruiseEnabled stays, lat stays). Not a
-    full session cancel — do not USER_DISABLE / hard_cancel_session /
-    take-control. Call after interceptor `gasPressed` is published so
-    DI_pedalPos (the interceptor command while ENABLE=1) cannot
-    false-trigger. Do not pause a standstill wait-for-gas resume or a
-    SET that just restored long. Toggle Off: gas stays OVERRIDE
-    (`enableLongControl` remains true).
+    Only when long is **already on** and the accelerator rises from
+    zero — same function as brake today:
+    `_drop_longitudinal_keep_lateral` (enableLongControl off,
+    cruiseEnabled stays, lat stays). Not a full session cancel.
+
+    Engage-while-gas-pressed (one or two SET pulls with the foot already
+    down) must not pause. Long stays armed so lift still runs the stock
+    A+B grace expire + aEgo / A3 climb handoff. Same-frame SET + first
+    gas sample is engage-with-gas, not a from-rest kick. Do not pause a
+    standstill wait-for-gas resume or a SET that just restored long.
+    Toggle Off: gas stays OVERRIDE (`enableLongControl` remains true).
     """
     gas_rising = bool(gas_pressed) and not bool(self.preap_gas_pressed_prev)
     self.preap_gas_pressed_prev = bool(gas_pressed)
-    if not one_pedal_long:
-      return False
-    if getattr(self, "_nap_set_resume_long", False):
-      return False
-    if getattr(self, "_nap_resume_wait_gas", False):
-      return False
-    if gas_rising and self.cruiseEnabled and self.enableLongControl:
+    long_already_on = bool(getattr(self, "_preap_one_pedal_long_was_on", False))
+    paused = False
+    skip_resume = getattr(self, "_nap_set_resume_long", False) or getattr(
+      self, "_nap_resume_wait_gas", False)
+    if (one_pedal_long and not skip_resume
+        and gas_rising and long_already_on
+        and self.cruiseEnabled and self.enableLongControl):
       carlog.debug("ONE-PEDAL LONG — gas from rest pausing longitudinal")
       self._drop_longitudinal_keep_lateral()
-      return True
-    return False
+      paused = True
+    self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
+    return paused
 
   def check_can_engage(self, door_open, gear_shifter, seatbelt_unlatched):
     """Check engagement prerequisites. Resets state if blocked."""
