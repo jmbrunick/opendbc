@@ -96,7 +96,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   }
 
   // DI brake closes the interval before the slower BrakeMessage arrives.
-  // The same frame also disables controls on leaving Drive.
+  // Leaving Drive re-arms via pcm_cruise_check(false) so the next SET works.
   if (msg->addr == 0x118U) {
     preap_di_brake_pressed = ((msg->data[1] >> 7) & 0x01U) != 0U;
     preap_gear = (msg->data[1] >> 4) & 0x07;
@@ -104,8 +104,12 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     preap_di_brake_ts = microsecond_timer_get();
     preap_gear_seen = true;
     preap_gear_ts = preap_di_brake_ts;
+    // Leaving Drive must clear cruise_engaged_prev. Setting
+    // controls_allowed=false alone leaves the PCM latch set, so the next
+    // Drive SET is not a rising edge: selfdrived enables, panda does not,
+    // controlsMismatch after ~2s. Same re-arm as steering disengage.
     if ((preap_gear_prev == 4) && (preap_gear != 4)) {
-      controls_allowed = false;
+      pcm_cruise_check(false);
     }
     preap_gear_prev = preap_gear;
   }
@@ -120,7 +124,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     int d_tr = (msg->data[5] >> 6) & 0x03;
     preap_doors_open = (d_fl == 1) || (d_fr == 1) || (d_rl == 1) || (d_rr == 1) || (d_ft == 1) || (d_tr == 1);
     if (preap_doors_open) {
-      controls_allowed = false;
+      pcm_cruise_check(false);
     }
     // BC_indicatorLStatus 59|2@0, BC_indicatorRStatus 61|2@0. Lamp on == 1.
     preap_left_lamp = ((msg->data[7] >> 2) & 0x03U) == 1U;

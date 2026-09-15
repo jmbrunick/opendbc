@@ -267,16 +267,46 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def test_gear_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
     self._rx(self._gear_msg(0))
     self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
     self._rx(self._gear_msg(4))
     self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_reverse_then_drive_set_reengages_without_latch(self):
+    """Leave Drive (R) must clear cruise_engaged_prev so the next SET allows.
+
+    The old path set controls_allowed=false only. cruise_engaged_prev
+    stayed true, so Drive SET was not a rising edge; controlsMismatch.
+    """
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._gear_msg(2))  # Reverse
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._gear_msg(4))  # Drive
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+
+  def test_park_then_drive_set_reengages_without_latch(self):
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._gear_msg(1))  # Park
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._gear_msg(4))  # Drive
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
 
   def test_door_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._door_msg(door_fl=1))
     self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
 
   def test_steering_disengage_hands_on(self):
     self._rx(self._pcm_status_msg(True))
@@ -493,6 +523,20 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self.assertTrue(self.safety.get_controls_allowed())
     msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 1})
     self.assertTrue(self._tx(msg))
+
+  def test_pedal_enable_allowed_after_reverse_drive_set(self):
+    """R/P must not leave interceptor ENABLE blocked on a clean Drive SET."""
+    enable = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 1})
+    disable = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 0})
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self._tx(enable))
+    self._rx(self._gear_msg(2))  # Reverse
+    self.assertFalse(self._tx(enable))
+    self.assertTrue(self._tx(disable))  # RELEASE still allowed
+    self._rx(self._gear_msg(4))  # Drive
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(enable))
 
   def test_pedal_blocked_without_controls(self):
     self.assertFalse(self.safety.get_controls_allowed())
