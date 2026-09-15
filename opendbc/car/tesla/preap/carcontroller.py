@@ -217,6 +217,11 @@ class PreAPLongController:
     self.prev_gas_pressed = False
     self.last_nonneg_a_ego = 0.0
     self.gas_long_handoff_pending = False
+    # One-Pedal: saw software long holding with the foot off. A later
+    # gas press is a takeover even if engagement's rising-edge kick
+    # missed. Cleared on session down / toggle Off / long-off (not our
+    # pause).
+    self._saw_long_without_gas = False
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
@@ -233,6 +238,68 @@ class PreAPLongController:
       if not requested_long:
         self.last_nonneg_a_ego = 0.0
     self.prev_gas_pressed = bool(gas_pressed)
+
+  @staticmethod
+  def _bridge_long_from_engagement(CS):
+    engagement = getattr(CS, 'engagement', None)
+    if engagement is None:
+      return
+    CS.enableLongControl = engagement.enableLongControl
+    CS.enableJustCC = engagement.enableJustCC
+    CS.pedal_speed_kph = engagement.pedal_speed_kph
+    CS.longCtrlEvent = engagement.longCtrlEvent
+    CS.one_pedal_pause_latched = bool(
+      getattr(engagement, '_one_pedal_pause_latched', False))
+
+  def _apply_one_pedal_pause(self, CS, gas_pressed, requested_long):
+    """Latch a gas takeover and block A+B resume until SET.
+
+    #171 only paused on a single interceptor rising edge. Stock
+    `gasPressedOverride` still ends on lift so `CC.longActive` goes
+    True; if that edge missed, `requested_long` stayed true and lift
+    ACQUIREd (A+B / A3 climb). Hold `_saw_long_without_gas` so any
+    later gas press is a takeover even when the kick misses.
+    """
+    engagement = getattr(CS, 'engagement', None)
+    one_pedal = bool(getattr(nap_conf, 'one_pedal_long', False)) or bool(
+      getattr(engagement, '_one_pedal_long_on', False))
+    if engagement is not None:
+      latched = bool(getattr(engagement, '_one_pedal_pause_latched', False))
+      CS.one_pedal_pause_latched = latched
+    else:
+      latched = bool(getattr(CS, 'one_pedal_pause_latched', False))
+
+    if not one_pedal or not bool(getattr(CS, 'cruiseEnabled', False)):
+      self._saw_long_without_gas = False
+      return requested_long, False
+
+    takeover = bool(self._saw_long_without_gas) and bool(gas_pressed)
+    if takeover:
+      if engagement is not None and hasattr(engagement, 'latch_one_pedal_gas_takeover'):
+        engagement.latch_one_pedal_gas_takeover()
+        self._bridge_long_from_engagement(CS)
+      elif engagement is not None:
+        engagement._one_pedal_pause_latched = True
+        if CS.enableLongControl and hasattr(engagement, '_drop_longitudinal_keep_lateral'):
+          engagement._drop_longitudinal_keep_lateral()
+          self._bridge_long_from_engagement(CS)
+      latched = True
+
+    if latched:
+      if engagement is not None and CS.enableLongControl:
+        if hasattr(engagement, '_drop_longitudinal_keep_lateral'):
+          engagement._drop_longitudinal_keep_lateral()
+          self._bridge_long_from_engagement(CS)
+        else:
+          CS.enableLongControl = False
+      requested_long = False
+      self.gas_long_handoff_pending = False
+    elif CS.enableLongControl:
+      self._saw_long_without_gas = not bool(gas_pressed)
+    else:
+      self._saw_long_without_gas = False
+
+    return requested_long, latched
 
   @staticmethod
   def _handle_pedal_unavailable(CS):
@@ -259,11 +326,10 @@ class PreAPLongController:
     can_sends = []
     actuators = CC.actuators
 
+    gas_pressed = bool(getattr(CS.out, 'gasPressed', False))
     requested_long = CS.cruiseEnabled and CS.enableLongControl
-    one_pedal_pause = bool(
-      getattr(getattr(CS, 'engagement', None), '_one_pedal_pause_latched', False)
-      or getattr(CS, 'one_pedal_pause_latched', False)
-    )
+    requested_long, one_pedal_pause = self._apply_one_pedal_pause(
+      CS, gas_pressed, requested_long)
     # Held One-Pedal gas-pause: do not command long until SET clears the
     # latch, even if enableLongControl / CC.longActive glitch true on lift.
     if one_pedal_pause:
@@ -273,7 +339,6 @@ class PreAPLongController:
     pedal_factor = float(nap_conf.pedal_factor)
     pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
     pedal_long_allowed = use_pedal and pedal_transform_valid
-    gas_pressed = bool(getattr(CS.out, 'gasPressed', False))
     brake_pressed = bool(getattr(CS, 'real_brake_pressed', False))
     self._update_gas_lift_handoff_state(requested_long, gas_pressed, brake_pressed, CS.out.aEgo)
     keep_enabled = self.brake_cancel.update(
