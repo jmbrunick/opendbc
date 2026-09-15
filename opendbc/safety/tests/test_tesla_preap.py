@@ -298,8 +298,63 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_cruise_engaged_prev())
     self._rx(self._gear_msg(4))  # Drive
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_drive_return_clears_leftover_latch_without_stalk_cancel(self):
+    """R/P→Drive must match stalk disable: leftover cruise_engaged_prev dies.
+
+    Justin: after Drive, re-engage still mismatched until a real stalk
+    cancel→SET. Python CANCEL spoof is TX-only and never hits this RX path.
+    """
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._gear_msg(2))  # Reverse
+    # Old bug: drop allowed, leave the PCM latch. TX-only CANCEL would
+    # not have cleared it either (panda does not RX its own TX).
+    self.safety.set_controls_allowed(False)
+    self.safety.set_cruise_engaged_prev(True)
+    self._rx(self._gear_msg(4))  # Drive — no RX CANCEL
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_drive_set_rearms_leftover_latch_without_extra_cancel(self):
+    """Drive SET while !allowed is cancel-then-SET. No extra stalk cycle."""
+    self._rx(self._pcm_status_msg(True))
+    self.safety.set_controls_allowed(False)
+    self.safety.set_cruise_engaged_prev(True)
+    # Already in Drive. No RX CANCEL. SET must still allow.
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+
+  def test_tx_cancel_clears_latch_only_when_already_disallowed(self):
+    """TX CANCEL spoof must re-arm when OP is already down, not drop an
+    in-session first-pull / brake-pause stock-CC cancel."""
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(self._pcm_status_msg(False)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+
+    self.safety.set_controls_allowed(False)
+    self.safety.set_cruise_engaged_prev(True)
+    self.assertTrue(self._tx(self._pcm_status_msg(False)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_set_while_already_allowed_does_not_drop(self):
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
 
   def test_door_disengage(self):
     self._rx(self._pcm_status_msg(True))

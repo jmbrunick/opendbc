@@ -96,7 +96,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   }
 
   // DI brake closes the interval before the slower BrakeMessage arrives.
-  // Leaving Drive re-arms via pcm_cruise_check(false) so the next SET works.
+  // Leaving Drive (and returning to Drive) re-arms via pcm_cruise_check(false).
   if (msg->addr == 0x118U) {
     preap_di_brake_pressed = ((msg->data[1] >> 7) & 0x01U) != 0U;
     preap_gear = (msg->data[1] >> 4) & 0x07;
@@ -104,11 +104,21 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     preap_di_brake_ts = microsecond_timer_get();
     preap_gear_seen = true;
     preap_gear_ts = preap_di_brake_ts;
-    // Leaving Drive must clear cruise_engaged_prev. Setting
-    // controls_allowed=false alone leaves the PCM latch set, so the next
-    // Drive SET is not a rising edge: selfdrived enables, panda does not,
-    // controlsMismatch after ~2s. Same re-arm as steering disengage.
-    if ((preap_gear_prev == 4) && (preap_gear != 4)) {
+    // R/P/N must leave the same clean PCM state as a real stalk disable:
+    // controls_allowed=false AND cruise_engaged_prev=false. Setting
+    // controls_allowed=false alone leaves the latch set, so the next Drive
+    // SET is not a rising edge: selfdrived enables, panda does not,
+    // controlsMismatch after ~2s.
+    //
+    // Python hard_cancel_session spoofs CANCEL on 0x45 TX. Panda does not
+    // RX its own TX, so that spoof cannot clear the latch — only a real
+    // stalk cancel on RX can, which is why Justin could recover with an
+    // extra stalk disable→enable after returning to Drive. Pulse false on
+    // every non-Drive 0x118 and again on the Drive rising edge so that
+    // extra cycle is not required.
+    if (preap_gear != 4) {
+      pcm_cruise_check(false);
+    } else if (preap_gear_prev != 4) {
       pcm_cruise_check(false);
     }
     preap_gear_prev = preap_gear;
@@ -139,6 +149,12 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     preap_update_stalk((int)(msg->data[2] & 0x03U));
     if (lever == 2) {  // RWD = pull toward driver = enable
       if ((preap_gear == 4) && !preap_doors_open) {
+        // Drive SET while !controls_allowed must match stalk cancel→SET.
+        // Leftover cruise_engaged_prev (TX-only CANCEL spoof, or a drop
+        // that only cleared controls_allowed) is not a rising edge.
+        if (!controls_allowed) {
+          pcm_cruise_check(false);
+        }
         pcm_cruise_check(true);
         preap_last_stalk_engage_us = microsecond_timer_get();
       }

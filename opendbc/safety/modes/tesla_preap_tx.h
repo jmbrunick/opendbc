@@ -38,6 +38,17 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     return preap_f190_tx_ok(msg);
   }
 
+  // STW_ACTN_RQ (0x45): python stock-CC spoof. Panda does not RX its own TX,
+  // so a CANCEL spoof never ran pcm_cruise_check — a real stalk cancel does.
+  // Only apply when already !controls_allowed so an in-session stock-CC
+  // cancel spoof (first-pull / brake long-pause) cannot drop lateral.
+  if (msg->addr == 0x45U) {
+    const int lever = msg->data[0] & 0x3FU;
+    if ((lever == 1) && !controls_allowed) {
+      pcm_cruise_check(false);
+    }
+  }
+
   // DAS_steeringControl (0x488)
   if (msg->addr == 0x488U) {
     int raw_angle_can = ((msg->data[0] & 0x7FU) << 8) | msg->data[1];
