@@ -50,10 +50,14 @@ class PreAPEngagement:
     self._one_pedal_had_long_at_rest = False
 
   def latch_one_pedal_gas_takeover(self):
-    """Long was holding; driver took the pedal. Pause until SET."""
+    """Long was holding; driver took the pedal. Pause until SET.
+
+    Always drop-keep-lat while the session is up so NAP's one-SET
+    resume overlay can latch `_nap_long_resume_pending` even when long
+    was already off (kick-miss / controller latch).
+    """
     if self.cruiseEnabled:
-      if self.enableLongControl:
-        self._drop_longitudinal_keep_lateral()
+      self._drop_longitudinal_keep_lateral()
       self._one_pedal_pause_latched = True
     return bool(self._one_pedal_pause_latched)
 
