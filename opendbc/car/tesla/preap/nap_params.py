@@ -14,6 +14,9 @@ class NAPParamKeys:
   ONE_PEDAL_LONG = "NAPOnePedalLong"
   PEDAL_ENABLED = "NAPPedalEnabled"
   FOLLOW_DISTANCE = "NAPFollowDistance"
+  FOLLOW_DISTANCE_CITY = "NAPFollowDistanceCity"
+  FOLLOW_DISTANCE_HWY = "NAPFollowDistanceHwy"
+  FOLLOW_DISTANCE_SPLIT_MIGRATED = "NAPFollowDistanceSplitMigrated"
   # Pedal Hardware
   PEDAL_PROFILE = "NAPPedalProfile"
   PEDAL_CAN_BUS = "NAPPedalCanBus"
@@ -49,6 +52,9 @@ DEFAULTS = {
   NAPParamKeys.ONE_PEDAL_LONG: False,
   NAPParamKeys.PEDAL_ENABLED: False,
   NAPParamKeys.FOLLOW_DISTANCE: 4,
+  NAPParamKeys.FOLLOW_DISTANCE_CITY: 4,
+  NAPParamKeys.FOLLOW_DISTANCE_HWY: 4,
+  NAPParamKeys.FOLLOW_DISTANCE_SPLIT_MIGRATED: False,
   NAPParamKeys.PEDAL_PROFILE: 4,
   NAPParamKeys.PEDAL_CAN_BUS: 2,
   NAPParamKeys.PEDAL_CALIB_DONE: False,
