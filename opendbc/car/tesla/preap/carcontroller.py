@@ -271,7 +271,19 @@ class PreAPLongController:
       self._saw_long_without_gas = False
       return requested_long, False
 
-    takeover = bool(self._saw_long_without_gas) and bool(gas_pressed)
+    # SET (or armed stop-SET) is the intended resume. Do not treat the
+    # still-held accelerator as a new takeover — that re-latched on the
+    # same frame and left long stuck paused. skip_resume also covers
+    # SET-while-gas → lift-to-start (A+B / A3).
+    skip_resume = bool(
+      getattr(engagement, '_nap_set_resume_long', False)
+      or getattr(engagement, '_nap_resume_wait_gas', False)
+    ) if engagement is not None else False
+    takeover = (
+      bool(self._saw_long_without_gas)
+      and bool(gas_pressed)
+      and not skip_resume
+    )
     if takeover:
       if engagement is not None and hasattr(engagement, 'latch_one_pedal_gas_takeover'):
         engagement.latch_one_pedal_gas_takeover()
@@ -292,6 +304,12 @@ class PreAPLongController:
           CS.enableLongControl = False
       requested_long = False
       self.gas_long_handoff_pending = False
+      # Pause is held by the SET latch. Clearing _saw stops SET-while-gas
+      # (and interceptor-sticky gas after lift) from re-firing takeover
+      # after the overlay has already restored long.
+      self._saw_long_without_gas = False
+    elif skip_resume:
+      self._saw_long_without_gas = bool(CS.enableLongControl) and not bool(gas_pressed)
     elif CS.enableLongControl:
       self._saw_long_without_gas = not bool(gas_pressed)
     else:
