@@ -46,6 +46,10 @@ class PreAPEngagement:
     # Stock gasPressed falling this cycle (DI crossed 2→below). Overlay
     # extra kick at DI>1 must not treat that lift-through as a tip-in.
     self._one_pedal_gas_falling_edge = False
+    # Long was armed while the foot was already down (SET-while-gas /
+    # engage-while-gas). Lift-to-start, not a from-rest takeover, until
+    # interceptor DI is fully off.
+    self._one_pedal_armed_with_gas = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
 
@@ -53,6 +57,7 @@ class PreAPEngagement:
     self._one_pedal_pause_latched = False
     self._one_pedal_had_long_at_rest = False
     self._one_pedal_gas_falling_edge = False
+    self._one_pedal_armed_with_gas = False
 
   def latch_one_pedal_gas_takeover(self):
     """Long was holding; driver took the pedal. Pause until SET.
@@ -178,7 +183,10 @@ class PreAPEngagement:
 
     Engage-while-gas-pressed (one or two SET pulls with the foot already
     down) never sets `_one_pedal_had_long_at_rest`, so lift still runs
-    A+B / A3. Same-frame SET + first gas sample is engage-with-gas.
+    A+B / A3. `_one_pedal_armed_with_gas` holds that grace through the
+    lift frame (dc 13:16:14: SET→lift ~197 ms) until interceptor DI is
+    fully off — do not set at-rest or overlay-pause on that falling edge.
+    Same-frame SET + first gas sample is engage-with-gas.
     Do not pause a standstill wait-for-gas resume or a SET that just
     restored long. Toggle Off: gas stays OVERRIDE (`enableLongControl`
     remains true).
@@ -231,6 +239,36 @@ class PreAPEngagement:
       self._clear_one_pedal_pause_latch()
       self._one_pedal_had_long_at_rest = bool(
         self.enableLongControl and not pause_gas)
+      self._one_pedal_armed_with_gas = bool(
+        self.enableLongControl and pause_gas)
+      self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
+      return False
+
+    if (
+      self.enableLongControl
+      and pause_gas
+      and not self._one_pedal_had_long_at_rest
+      and not self._one_pedal_pause_latched
+    ):
+      self._one_pedal_armed_with_gas = True
+
+    if self._one_pedal_armed_with_gas:
+      fully_off = not pause_gas
+      if interceptor_di is not None:
+        try:
+          fully_off = fully_off and (float(interceptor_di) <= ONE_PEDAL_GAS_DI_PRESSED)
+        except (TypeError, ValueError):
+          pass
+      elif pause_gas:
+        fully_off = False
+      else:
+        # Stock falling without DI: stay armed so overlay extra True is
+        # lift-through, not a tip-in. Overlay completes when DI ≤ 1.
+        fully_off = False
+      if fully_off:
+        self._one_pedal_armed_with_gas = False
+        if self.enableLongControl:
+          self._one_pedal_had_long_at_rest = True
       self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
       return False
 

@@ -587,6 +587,12 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     """Carstate orig kick then overlay extra kick (DI > 1)."""
     paused = eng.maybe_one_pedal_gas_kick(
       stock_gas, True, interceptor_di=interceptor_di)
+    if bool(getattr(eng, "_one_pedal_armed_with_gas", False)):
+      if interceptor_di is not None and float(interceptor_di) <= 1.0:
+        eng._one_pedal_armed_with_gas = False
+        if eng.enableLongControl:
+          eng._one_pedal_had_long_at_rest = True
+      return paused
     if interceptor_di is not None and float(interceptor_di) > 1.0:
       if bool(getattr(eng, "_one_pedal_gas_falling_edge", False)):
         eng._one_pedal_gas_falling_edge = False
@@ -639,6 +645,58 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertTrue(self._overlay_kick_cycle(eng, True, 6.0))
     self.assertFalse(eng.enableLongControl)
     self.assertTrue(eng._one_pedal_pause_latched)
+
+  def test_dc_131614_set_to_lift_197ms_stays_armed(self):
+    """dc 13:16:14: lat already on; SET-while-gas at .719, lift at .916 (~197 ms)."""
+    eng = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=750)
+    self.assertFalse(self._overlay_kick_cycle(eng, True, 8.0))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=14319, v_ego=22.75, speed_units="MPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+    self.assertFalse(self._overlay_kick_cycle(eng, True, 8.0))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=14719, v_ego=22.75, speed_units="MPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.enableLongControl)
+    held = eng.pedal_speed_kph
+    self.assertFalse(self._overlay_kick_cycle(eng, True, 6.0))
+    self.assertTrue(getattr(eng, "_one_pedal_armed_with_gas", False))
+    # Lift 197 ms later, stock gasPressed False, DI still > 1.
+    self.assertFalse(self._overlay_kick_cycle(eng, False, 1.5))
+    self.assertTrue(eng.enableLongControl)
+    self.assertTrue(eng._one_pedal_armed_with_gas)
+    self.assertFalse(eng._one_pedal_pause_latched)
+    self.assertFalse(eng._one_pedal_had_long_at_rest)
+    self.assertAlmostEqual(eng.pedal_speed_kph, held)
+
+  def test_dc_131530_lift_stays_long_for_7s_without_set(self):
+    """dc 13:15:30: lift must not leave a 7.5 s stock-regen window."""
+    eng = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=750)
+    self.assertFalse(self._overlay_kick_cycle(eng, True, 8.0))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=24.5, speed_units="MPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertFalse(self._overlay_kick_cycle(eng, True, 8.0))
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1400, v_ego=24.5, speed_units="MPH",
+      use_pedal=True, pedal_long_allowed=True,
+      long_control_allowed=True, real_brake_pressed=False)
+    self.assertTrue(eng.enableLongControl)
+    self.assertFalse(self._overlay_kick_cycle(eng, False, 1.5))
+    for i in range(75):
+      di = 1.4 if i < 5 else 0.0
+      self.assertFalse(self._overlay_kick_cycle(eng, False, di))
+      self.assertTrue(eng.enableLongControl, i)
+      self.assertFalse(eng._one_pedal_pause_latched, i)
 
   def test_stock_falling_then_extra_true_without_di_does_not_pause(self):
     """Same-frame orig kick(False) then overlay kick(True) without DI.

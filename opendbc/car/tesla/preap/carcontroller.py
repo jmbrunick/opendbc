@@ -274,10 +274,12 @@ class PreAPLongController:
     # SET (or armed stop-SET) is the intended resume. Do not treat the
     # still-held accelerator as a new takeover — that re-latched on the
     # same frame and left long stuck paused. skip_resume also covers
-    # SET-while-gas → lift-to-start (A+B / A3).
+    # SET-while-gas / engage-while-gas lift-to-start (`_one_pedal_armed_with_gas`)
+    # until interceptor DI is fully off (A+B / A3).
     skip_resume = bool(
       getattr(engagement, '_nap_set_resume_long', False)
       or getattr(engagement, '_nap_resume_wait_gas', False)
+      or getattr(engagement, '_one_pedal_armed_with_gas', False)
     ) if engagement is not None else False
     takeover = (
       bool(self._saw_long_without_gas)
