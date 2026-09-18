@@ -169,7 +169,8 @@ def update_preap(cs, can_parsers):
   if nap_conf.use_pedal:
     ret.gasPressed = cs.pedal.gas_pressed
     cs.engagement.maybe_one_pedal_gas_kick(
-      bool(ret.gasPressed), bool(nap_conf.one_pedal_long))
+      bool(ret.gasPressed), bool(nap_conf.one_pedal_long),
+      interceptor_di=cs.pedal_interceptor_value)
     # Gas pause may have released long; re-bridge so carcontroller sees it.
     cs.enableLongControl = cs.engagement.enableLongControl
     cs.enableJustCC = cs.engagement.enableJustCC
