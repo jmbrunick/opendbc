@@ -15,7 +15,12 @@ from opendbc.can import CANPacker
 from opendbc.car import CanData
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.tesla.preap.nap_conf import nap_conf
+from opendbc.car.tesla.preap.carstate import (
+  DI_PEDAL_POS_SNA_PERCENT,
+  di_pedal_pos_gas,
+  di_pedal_pos_percent,
+)
+from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_PRESSED
 
 
 class TestPreAPCarStateUpdate(unittest.TestCase):
@@ -175,6 +180,56 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
     self.assertFalse(CI.CS.real_brake_pressed)
     self.assertFalse(CS.brakePressed)
+
+  def test_di_pedal_pos_scale_is_percent_then_0_1_gas(self):
+    """DBC factor 0.4 → percent; cereal gas is 0–1 (percent/100). SNA → 0."""
+    self.assertEqual(DI_PEDAL_POS_SNA_PERCENT, 102.0)
+    self.assertAlmostEqual(di_pedal_pos_percent(0), 0.0)
+    self.assertAlmostEqual(di_pedal_pos_percent(20.0), 20.0)
+    self.assertAlmostEqual(di_pedal_pos_gas(20.0), 0.20)
+    self.assertAlmostEqual(di_pedal_pos_percent(100.0), 100.0)
+    self.assertAlmostEqual(di_pedal_pos_gas(100.0), 1.0)
+    self.assertAlmostEqual(di_pedal_pos_percent(102.0), 0.0)
+    self.assertAlmostEqual(di_pedal_pos_percent(255), 0.0)
+    self.assertAlmostEqual(di_pedal_pos_percent(float("nan")), 0.0)
+    self.assertAlmostEqual(di_pedal_pos_gas(None), 0.0)
+    self.assertGreater(20.0, PEDAL_DI_PRESSED)
+    self.assertFalse(di_pedal_pos_percent(2.0) > PEDAL_DI_PRESSED)
+    self.assertTrue(di_pedal_pos_percent(2.4) > PEDAL_DI_PRESSED)
+
+  def test_analog_gas_publishes_di_pedal_pos(self):
+    """qlogs/cabana: gasDEPRECATED is DI_pedalPos/100, not interceptor."""
+    CI = self._make_interface()
+    CS = CI.update(self._can_packet("DI_torque1", {"DI_pedalPos": 20}))
+    self.assertTrue(hasattr(CS, "gasDEPRECATED"))
+    self.assertAlmostEqual(CS.gasDEPRECATED, 0.20, places=3)
+    self.assertTrue(CS.gasPressed)
+    self.assertAlmostEqual(getattr(CI.CS, "di_pedal_pos", 0.0), 20.0, places=3)
+
+    CS = CI.update(self._can_packet("DI_torque1", {"DI_pedalPos": 0}))
+    self.assertAlmostEqual(CS.gasDEPRECATED, 0.0, places=3)
+    self.assertFalse(CS.gasPressed)
+
+  def test_pass_through_gas_pressed_follows_di_not_sticky_interceptor(self):
+    """Interceptor rest-noise must not pin gasPressed while DI is at coast."""
+    CI = self._make_interface()
+    CI.CS.pedal.interceptor_value = 10.0
+    with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True), \
+         patch.object(CI.CS.pedal, "update"):
+      CI.CS.pedal_authority_active = False
+      CS = CI.update(self._can_packet("DI_torque1", {"DI_pedalPos": 0}))
+      self.assertFalse(CS.gasPressed)
+      self.assertAlmostEqual(CS.gasDEPRECATED, 0.0, places=3)
+
+      CS = CI.update(self._can_packet("DI_torque1", {"DI_pedalPos": 16}))
+      self.assertTrue(CS.gasPressed)
+      self.assertAlmostEqual(CS.gasDEPRECATED, 0.16, places=3)
+
+      CI.CS.pedal_authority_active = True
+      CI.CS.pedal.interceptor_value = 10.0
+      CS = CI.update(self._can_packet("DI_torque1", {"DI_pedalPos": 0}))
+      self.assertTrue(CS.gasPressed)
+      self.assertAlmostEqual(CS.gasDEPRECATED, 0.0, places=3)
 
 
 if __name__ == "__main__":

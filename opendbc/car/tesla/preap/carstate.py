@@ -19,6 +19,40 @@ except ImportError:
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
 HANDS_ON_DISENGAGE_LEVEL = 2
 
+# tesla_preap.dbc: SG_ DI_pedalPos : 48|8@1+ (0.4,0) [0|100] "%"
+# The CAN parser already applies 0.4, so values here are percent.
+# SNA raw 255 → 102.0. CarState.gas / gasDEPRECATED is 0–1 (percent / 100).
+DI_PEDAL_POS_SNA_PERCENT = 255 * 0.4
+DI_PEDAL_POS_MAX_PERCENT = 100.0
+
+
+def di_pedal_pos_percent(di_pedal_pos) -> float:
+  """Parser-scaled DI_pedalPos as 0–100%. SNA / invalid → 0."""
+  try:
+    pos = float(di_pedal_pos)
+  except (TypeError, ValueError):
+    return 0.0
+  if not math.isfinite(pos) or pos >= (DI_PEDAL_POS_SNA_PERCENT - 1e-6):
+    return 0.0
+  return max(0.0, min(DI_PEDAL_POS_MAX_PERCENT, pos))
+
+
+def di_pedal_pos_gas(di_pedal_pos) -> float:
+  """CarState.gas / gasDEPRECATED in 0–1 from DI_pedalPos percent."""
+  return di_pedal_pos_percent(di_pedal_pos) / 100.0
+
+
+def _publish_analog_gas(ret, gas_01: float) -> None:
+  """Write analog pedal into cereal. Schema name is gasDEPRECATED (legacy gas)."""
+  gas_01 = float(gas_01)
+  if hasattr(ret, "gasDEPRECATED"):
+    ret.gasDEPRECATED = gas_01
+  if hasattr(ret, "gas"):
+    try:
+      ret.gas = gas_01
+    except (AttributeError, TypeError):
+      pass
+
 
 def _current_time_millis():
   return int(round(time.time() * 1000))
@@ -34,8 +68,20 @@ def update_preap(cs, can_parsers):
   ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
   ret.vEgo, ret.aEgo = cs.update_speed_kf(ret.vEgoRaw)
 
-  # Gas pedal — threshold avoids sticky overrides from DI_pedalPos noise
-  ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > PEDAL_DI_PRESSED
+  # Analog DI_pedalPos every frame (qlogs / cabana). 0–1 = percent/100.
+  # gasPressed from Tesla DI while interceptor is pass-through; interceptor
+  # only when pedal authority is active (DI then echoes the command).
+  try:
+    di_pedal_raw = cp_pt.vl["DI_torque1"]["DI_pedalPos"]
+  except (KeyError, TypeError):
+    di_pedal_raw = 0.0
+  di_pedal_pct = di_pedal_pos_percent(di_pedal_raw)
+  cs.di_pedal_pos = di_pedal_pct
+  engagement = getattr(cs, "engagement", None)
+  if engagement is not None:
+    engagement._nap_di_pedal_pos = di_pedal_pct
+  _publish_analog_gas(ret, di_pedal_pct / 100.0)
+  ret.gasPressed = di_pedal_pct > PEDAL_DI_PRESSED
 
   # Brake pedal
   ret.brake = 0
@@ -167,7 +213,12 @@ def update_preap(cs, can_parsers):
   cs.pedal_timeout = cs.pedal.timeout
 
   if nap_conf.use_pedal:
-    ret.gasPressed = cs.pedal.gas_pressed
+    if bool(getattr(cs, "pedal_authority_active", False)):
+      # OP owns the pedal: DI_pedalPos is the command, not the foot.
+      ret.gasPressed = cs.pedal.gas_pressed
+    # else keep DI-based gasPressed so interceptor rest-noise cannot
+    # pin OVERRIDE / block acquire, and a missed interceptor still
+    # waits for lift when Tesla sees a real press.
     cs.engagement.maybe_one_pedal_gas_kick(
       bool(ret.gasPressed), bool(nap_conf.one_pedal_long))
     # Gas pause may have released long; re-bridge so carcontroller sees it.
