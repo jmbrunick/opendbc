@@ -55,6 +55,9 @@ def normalize_radar_donor_vin(value):
 PEDAL_DI_MIN = -5       # Max regen (coasting hard)
 PEDAL_DI_ZERO = 0       # Neutral
 PEDAL_DI_PRESSED = 2    # "pedal pressed" threshold
+# One-Pedal Long pause is slightly more sensitive than stock gasPressed so a
+# light tip-in latches. Stock OVERRIDE / gasPressed stays PEDAL_DI_PRESSED.
+ONE_PEDAL_GAS_DI_PRESSED = 1.0
 
 ACCEL_MAX = 2.5         # m/s^2
 REGEN_MAX = -1.5        # m/s^2

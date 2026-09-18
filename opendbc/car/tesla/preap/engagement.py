@@ -1,6 +1,7 @@
 from opendbc.car import structs
 from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.tesla.preap.nap_conf import ONE_PEDAL_GAS_DI_PRESSED
 from opendbc.car.tesla.values import CruiseButtons
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -42,12 +43,16 @@ class PreAPEngagement:
     self._one_pedal_pause_latched = False
     self._one_pedal_had_long_at_rest = False
     self._one_pedal_long_on = False
+    # Stock gasPressed falling this cycle (DI crossed 2→below). Overlay
+    # extra kick at DI>1 must not treat that lift-through as a tip-in.
+    self._one_pedal_gas_falling_edge = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
 
   def _clear_one_pedal_pause_latch(self):
     self._one_pedal_pause_latched = False
     self._one_pedal_had_long_at_rest = False
+    self._one_pedal_gas_falling_edge = False
 
   def latch_one_pedal_gas_takeover(self):
     """Long was holding; driver took the pedal. Pause until SET.
@@ -157,7 +162,7 @@ class PreAPEngagement:
 
     return button_events
 
-  def maybe_one_pedal_gas_kick(self, gas_pressed, one_pedal_long):
+  def maybe_one_pedal_gas_kick(self, gas_pressed, one_pedal_long, interceptor_di=None):
     """Gas takeover while long was holding pauses until a stalk SET.
 
     When long is **already holding with the foot off**, a later
@@ -177,12 +182,37 @@ class PreAPEngagement:
     Do not pause a standstill wait-for-gas resume or a SET that just
     restored long. Toggle Off: gas stays OVERRIDE (`enableLongControl`
     remains true).
+
+    Pause gas is stock `gasPressed` (DI > 2) **or** interceptor DI > 1
+    when One-Pedal is On. Passing `interceptor_di` keeps lift-through
+    the 1–2 deadzone as still-on-gas (not a falling then overlay extra
+    rising that would latch a pause and drop enableLongControl).
     """
     gas_pressed = bool(gas_pressed)
     one_pedal_long = bool(one_pedal_long)
     self._one_pedal_long_on = one_pedal_long
-    gas_rising = gas_pressed and not bool(self.preap_gas_pressed_prev)
-    self.preap_gas_pressed_prev = gas_pressed
+    pause_gas = gas_pressed
+    if one_pedal_long and interceptor_di is not None:
+      try:
+        pause_gas = pause_gas or (float(interceptor_di) > ONE_PEDAL_GAS_DI_PRESSED)
+      except (TypeError, ValueError):
+        pass
+    gas_rising = pause_gas and not bool(self.preap_gas_pressed_prev)
+    gas_falling = (not pause_gas) and bool(self.preap_gas_pressed_prev)
+    # Overlay extra kick(True) after orig already processed stock
+    # gasPressed falling this cycle is lift-through DI 1–2, not a
+    # light tip-in. Do not manufacture a rising-edge takeover.
+    phantom_rise = gas_rising and bool(self._one_pedal_gas_falling_edge)
+    if gas_falling:
+      self._one_pedal_gas_falling_edge = True
+    elif not pause_gas:
+      self._one_pedal_gas_falling_edge = False
+    # Fully off with a known interceptor DI: overlay extra will not
+    # fire this cycle, so do not leave falling_edge to block the next
+    # from-rest press.
+    if interceptor_di is not None and not pause_gas:
+      self._one_pedal_gas_falling_edge = False
+    self.preap_gas_pressed_prev = pause_gas
     long_already_on = bool(getattr(self, "_preap_one_pedal_long_was_on", False))
     paused = False
     skip_resume = bool(getattr(self, "_nap_set_resume_long", False) or getattr(
@@ -200,14 +230,21 @@ class PreAPEngagement:
       # re-latch (treat like engage-with-gas until the foot is off).
       self._clear_one_pedal_pause_latch()
       self._one_pedal_had_long_at_rest = bool(
-        self.enableLongControl and not gas_pressed)
+        self.enableLongControl and not pause_gas)
       self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
       return False
 
-    if self.enableLongControl and not gas_pressed:
+    if phantom_rise:
+      # Same-cycle overlay extra True. Consume the falling-edge flag so a
+      # later from-rest press can still pause.
+      self._one_pedal_gas_falling_edge = False
+      self._preap_one_pedal_long_was_on = bool(self.enableLongControl)
+      return False
+
+    if self.enableLongControl and not pause_gas:
       self._one_pedal_had_long_at_rest = True
 
-    takeover = gas_pressed and (
+    takeover = pause_gas and (
       bool(self._one_pedal_had_long_at_rest)
       or (gas_rising and long_already_on and self.enableLongControl)
     )
