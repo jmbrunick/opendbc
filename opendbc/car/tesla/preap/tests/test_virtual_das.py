@@ -1510,3 +1510,32 @@ class TestVDASDomainBoundaries:
     assert vdas.a_ego_filter.x == pytest.approx(measured_acceleration, abs=0.01)
     assert vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration, abs=0.01)
     assert vdas.jerk_limiter.a_limited == pytest.approx(0.0)
+
+
+def test_vdas_does_not_dump_regen_when_planner_near_zero():
+  """ef 10:18:42: a_cmd ≈ 0 must not let inner PID dump to REGEN_MAX."""
+  from opendbc.car.tesla.preap.virtual_das import (
+    FOLLOW_STEADY_REGEN_FLOOR_MS2,
+    follow_steady_regen_floor,
+  )
+
+  assert follow_steady_regen_floor(0.0) == pytest.approx(FOLLOW_STEADY_REGEN_FLOOR_MS2)
+  assert follow_steady_regen_floor(0.02) == pytest.approx(FOLLOW_STEADY_REGEN_FLOOR_MS2)
+  assert follow_steady_regen_floor(-0.50) is None
+  assert follow_steady_regen_floor(-1.20) is None
+  assert follow_steady_regen_floor(0.25) is None
+
+  vdas = VirtualDAS(dt=0.02)
+  vdas.reset(measured_accel=1.20, commanded_accel=0.0, pedal_di_init=4.0)
+  pedal_di = 4.0
+  for _ in range(40):
+    pedal_di = vdas.update(0.0, v_ego=30.0, prev_pedal_di=pedal_di, a_ego=1.20)
+  assert vdas.prev_accel_effort >= FOLLOW_STEADY_REGEN_FLOOR_MS2 - 1e-9
+  assert vdas.prev_accel_effort > -1.00
+
+  vdas_hard = VirtualDAS(dt=0.02)
+  vdas_hard.reset(measured_accel=0.0, commanded_accel=-1.20, pedal_di_init=0.0)
+  pedal_hard = 0.0
+  for _ in range(40):
+    pedal_hard = vdas_hard.update(-1.20, v_ego=30.0, prev_pedal_di=pedal_hard, a_ego=0.0)
+  assert vdas_hard.prev_accel_effort <= -1.00
