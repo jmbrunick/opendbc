@@ -219,16 +219,29 @@ static void preap_update_blinker_hold(void) {
   }
 }
 
+// EPAS hands-on top value. Level 2 is PREAP_HANDS_ON_DISENGAGE_LEVEL and
+// stays a lane-change confirm during tipped ALC. Level 3 is an emergency
+// yank and must still disengage. Reflash the panda after this change.
+#define PREAP_HANDS_ON_MAX_LEVEL 3
+
 static bool preap_blinker_turn_blocks_disengage(void) {
   // Hard gate matches blinker_turn_blocks_steering_disengage: one lamp
   // XOR, physical LEFT/RIGHT, or the flash-latch / post-turn hold.
-  // ALC keep-alive is not a driver turn (no turn_active), so leftover
-  // flashes do not by themselves keep controls_allowed once lamps are dark.
+  // A latched driver turn still blocks, including hands-on level 3.
   if (preap_left_lamp != preap_right_lamp) {
     return true;
   }
   if ((preap_stalk_dir == 1) || (preap_stalk_dir == 2)) {
     return true;
   }
-  return preap_turn_active || preap_turn_holding;
+  if (preap_turn_active || preap_turn_holding) {
+    return true;
+  }
+  // Tipped ALC / keep-alive, including the ~1s lamp flash-dark gap.
+  // Hands-on level 2 must not drop controls here. Level 3 must.
+  // No signal (alc_keep clear, lamps dark, stalk idle) does not block.
+  if (preap_alc_keep && (preap_hands_on_level < PREAP_HANDS_ON_MAX_LEVEL)) {
+    return true;
+  }
+  return false;
 }
