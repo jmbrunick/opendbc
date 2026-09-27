@@ -202,6 +202,36 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self._rx(self._gtw_blinker_msg(left=1, door_fl=1))
     self.assertFalse(self.safety.get_controls_allowed())
 
+  def test_alc_flash_gap_hands_on_two_keeps_controls(self):
+    # Tipped ALC: lamps go dark between flashes. Hands-on level 2 is the
+    # lane-change confirm and must not drop controls_allowed. Reflash panda.
+    t = self._engage_past_echo()
+    self._rx(self._stw_turn_msg(stalk=1))
+    self._rx(self._gtw_blinker_msg(left=1))
+    self.safety.set_timer(t + 200000)
+    self._rx(self._stw_turn_msg(stalk=0))
+    self._rx(self._gtw_blinker_msg(left=0, right=0))
+    self._rx(self._angle_meas_msg(0, hands_on_level=2))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_hands_on_with_no_signal_does_not_keep_controls(self):
+    self._engage_past_echo()
+    self._rx(self._gtw_blinker_msg(left=0, right=0))
+    self._rx(self._stw_turn_msg(stalk=0))
+    self._rx(self._angle_meas_msg(0, hands_on_level=2))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_alc_flash_gap_hands_on_max_allows_disengage(self):
+    # Level 3 is an emergency yank. Flash-gap tolerance must not suppress it.
+    t = self._engage_past_echo()
+    self._rx(self._stw_turn_msg(stalk=1))
+    self._rx(self._gtw_blinker_msg(left=1))
+    self.safety.set_timer(t + 200000)
+    self._rx(self._stw_turn_msg(stalk=0))
+    self._rx(self._gtw_blinker_msg(left=0, right=0))
+    self._rx(self._angle_meas_msg(0, hands_on_level=3))
+    self.assertFalse(self.safety.get_controls_allowed())
+
   def test_gear_during_blinker_turn_still_drops(self):
     self._engage_past_echo()
     self._rx(self._gtw_blinker_msg(left=1))
