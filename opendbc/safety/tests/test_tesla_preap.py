@@ -153,6 +153,17 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     }
     return self.packer.make_can_msg_safety("GTW_carState", 0, values)
 
+  def _active_steer_tx(self, t_us):
+    """Allowed DAS_steeringControlType=1 at t_us: openpilot is steering (A).
+
+    A hands-on >= 2 edge cancels only while an active steering request
+    went out within 100 ms and no re-arm grace is running. Use the
+    caller's clock, not the shared command counter.
+    """
+    self.safety.set_timer(t_us)
+    self._rx(self._angle_meas_msg(0))
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, 1, increment_timer=False)))
+
   def _engage_and_advance_timer(self):
     """Engage via stalk and advance timer past the 600ms echo filter window."""
     self._rx(self._pcm_status_msg(True))
@@ -363,8 +374,10 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.assertFalse(self.safety.get_cruise_engaged_prev())
 
   def test_steering_disengage_hands_on(self):
+    # A: openpilot is steering when the hands-on edge arrives.
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+    self._active_steer_tx(1000000)
     self._rx(self._angle_meas_msg(0, hands_on_level=1))
     self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
@@ -379,6 +392,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
       self._setup_safety_hooks()
       self._rx(self._pcm_status_msg(True))
       self.assertTrue(self.safety.get_controls_allowed(), f"Setup failed for error code {error_code}")
+      self._active_steer_tx(1000000)  # A: openpilot is steering
       self._rx(self._angle_meas_msg(0, hands_on_level=0, eac_status=0, eac_error_code=error_code))
       self.assertFalse(self.safety.get_controls_allowed(), f"Error code {error_code} should disengage")
 
@@ -405,6 +419,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def test_stalk_rearm_after_steering_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+    self._active_steer_tx(1000000)
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_cruise_engaged_prev())
