@@ -68,7 +68,11 @@ def update_preap(cs, can_parsers):
     "EAC_ERROR_HIGH_ANGLE_SAFETY", "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY",
   )
   ret.steeringDisengage = cs.hands_on_level >= HANDS_ON_DISENGAGE_LEVEL or epas_rejecting
-  cs.engagement.handle_steering_disengage(ret.steeringDisengage)
+  # A hands-on edge cancels only while OP is in full control of lateral;
+  # with lateral yielded to the driver it is a driver maneuver (B). Evaluated
+  # once per frame so the edge decision and the published state agree.
+  cs.lat_full_control = cs.engagement.lat_yield.full_control()
+  cs.engagement.handle_steering_disengage(ret.steeringDisengage, cs.lat_full_control)
 
   # Cruise state
   cruise_state = cs.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
