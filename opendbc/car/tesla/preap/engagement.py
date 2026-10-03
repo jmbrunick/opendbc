@@ -1,6 +1,7 @@
 from opendbc.car import structs
 from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.tesla.preap.lat_yield import LatYieldTracker
 from opendbc.car.tesla.preap.nap_conf import ONE_PEDAL_GAS_DI_PRESSED
 from opendbc.car.tesla.values import CruiseButtons
 
@@ -52,6 +53,9 @@ class PreAPEngagement:
     self._one_pedal_armed_with_gas = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
+    # Lateral-yield history (what 0x488 actually carried). Decides A vs B
+    # on a hands-on edge; see preap/lat_yield.py and tesla_preap_latyield.h.
+    self.lat_yield = LatYieldTracker()
 
   def _clear_one_pedal_pause_latch(self):
     self._one_pedal_pause_latched = False
@@ -89,8 +93,22 @@ class PreAPEngagement:
     self.pedal_unavailable = True
     self._drop_longitudinal_keep_lateral()
 
-  def handle_steering_disengage(self, steering_disengage):
-    """Reset engagement on steering disengage rising edge."""
+  def handle_steering_disengage(self, steering_disengage, lat_full_control=True):
+    """Reset engagement on steering disengage rising edge.
+
+    ``lat_full_control`` is True while OP is in full control of lateral (A): the
+    edge is a yank and tears the session down. False means lateral was
+    yielded to the driver (B): the wheel input is a driver maneuver, the
+    session (and longitudinal) stays, and active steering is refused
+    until the hands release. The default keeps callers that do not track
+    lateral on the old always-cancel behavior.
+    """
+    self.lat_yield.update_block(steering_disengage)
+    if (steering_disengage and not self.prev_steering_disengage
+        and not lat_full_control and self.cruiseEnabled):
+      self.lat_yield.block()
+      self.prev_steering_disengage = steering_disengage
+      return
     if steering_disengage and not self.prev_steering_disengage:
       was_long_active = self.enableLongControl
       self.cruiseEnabled = False
