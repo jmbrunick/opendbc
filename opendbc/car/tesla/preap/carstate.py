@@ -68,7 +68,11 @@ def update_preap(cs, can_parsers):
     "EAC_ERROR_HIGH_ANGLE_SAFETY", "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY",
   )
   ret.steeringDisengage = cs.hands_on_level >= HANDS_ON_DISENGAGE_LEVEL or epas_rejecting
-  cs.engagement.handle_steering_disengage(ret.steeringDisengage)
+  # A hands-on edge cancels only while OP is in full control of lateral;
+  # with lateral yielded to the driver it is a driver maneuver (B). Evaluated
+  # once per frame so the edge decision and the published state agree.
+  cs.lat_full_control = cs.engagement.lat_yield.full_control()
+  cs.engagement.handle_steering_disengage(ret.steeringDisengage, cs.lat_full_control)
 
   # Cruise state
   cruise_state = cs.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
@@ -168,6 +172,15 @@ def update_preap(cs, can_parsers):
 
   if nap_conf.use_pedal:
     ret.gasPressed = cs.pedal.gas_pressed
+    cs.engagement.maybe_one_pedal_gas_kick(
+      bool(ret.gasPressed), bool(nap_conf.one_pedal_long),
+      interceptor_di=cs.pedal_interceptor_value)
+    # Gas pause may have released long; re-bridge so carcontroller sees it.
+    cs.enableLongControl = cs.engagement.enableLongControl
+    cs.enableJustCC = cs.engagement.enableJustCC
+    cs.pedal_speed_kph = cs.engagement.pedal_speed_kph
+    cs.longCtrlEvent = cs.engagement.longCtrlEvent
+    cs.one_pedal_pause_latched = bool(cs.engagement._one_pedal_pause_latched)
 
   cs.das_control = None
   cs.cruise_enabled_prev = ret.cruiseState.enabled

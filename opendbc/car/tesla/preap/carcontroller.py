@@ -26,6 +26,25 @@ def init_preap_can(dbc_names, packers):
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
 
+
+def gas_lift_handoff_seed_accel(last_nonneg_a_ego, measured_accel, engage_a_max,
+                                planner_accel):
+  """Seed VDAS commanded accel after a gas→long handoff.
+
+  Open-road climb uses the planner request (Mannerisms Accel 1–10 toward
+  MAX) as well as last non-negative aEgo — not aEgo alone. Clamped to
+  [0, engage_a_max]. Lead hard decel / FCW / should-stop (planner < 0) win.
+  """
+  if not np.isfinite(planner_accel) or planner_accel < 0.0:
+    return 0.0
+  seed = 0.0
+  for candidate in (last_nonneg_a_ego, measured_accel, planner_accel):
+    if np.isfinite(candidate) and candidate >= 0.0:
+      seed = max(seed, float(candidate))
+  if not np.isfinite(engage_a_max) or engage_a_max <= 0.0:
+    return 0.0
+  return min(seed, float(engage_a_max))
+
 # The pedal controller updates at 50 Hz. Prompt when a sustained deceleration
 # request is not being delivered while the command is in the regen range.
 # Available regen varies with SOC and battery temperature, so proximity to
@@ -191,9 +210,114 @@ class PreAPLongController:
     # ceiling for the grace-period ramp. Set fresh on each engage rising edge.
     self.engage_a_max = 0.0
     self.preap_long_handoff_slew_active = False
+    # Gas→long handoff: last non-negative aEgo while the driver was on the
+    # pedal, and a pending flag set on the falling edge. First engage without
+    # gas does not use these — it still gets the 0.5 s grace floor.
+    self.prev_gas_pressed = False
+    self.last_nonneg_a_ego = 0.0
+    self.gas_long_handoff_pending = False
+    # One-Pedal: saw software long holding with the foot off. A later
+    # gas press is a takeover even if engagement's rising-edge kick
+    # missed. Cleared on session down / toggle Off / long-off (not our
+    # pause).
+    self._saw_long_without_gas = False
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
+
+  def _update_gas_lift_handoff_state(self, requested_long, gas_pressed, brake_pressed, a_ego):
+    """Track gas falling edge / last non-negative aEgo while software long is up."""
+    if requested_long and gas_pressed and np.isfinite(a_ego) and a_ego >= 0.0:
+      self.last_nonneg_a_ego = float(a_ego)
+    if requested_long and self.prev_gas_pressed and not gas_pressed and not brake_pressed:
+      self.gas_long_handoff_pending = True
+    if (not requested_long) or brake_pressed:
+      self.gas_long_handoff_pending = False
+      if not requested_long:
+        self.last_nonneg_a_ego = 0.0
+    self.prev_gas_pressed = bool(gas_pressed)
+
+  @staticmethod
+  def _bridge_long_from_engagement(CS):
+    engagement = getattr(CS, 'engagement', None)
+    if engagement is None:
+      return
+    CS.enableLongControl = engagement.enableLongControl
+    CS.enableJustCC = engagement.enableJustCC
+    CS.pedal_speed_kph = engagement.pedal_speed_kph
+    CS.longCtrlEvent = engagement.longCtrlEvent
+    CS.one_pedal_pause_latched = bool(
+      getattr(engagement, '_one_pedal_pause_latched', False))
+
+  def _apply_one_pedal_pause(self, CS, gas_pressed, requested_long):
+    """Latch a gas takeover and block A+B resume until SET.
+
+    #171 only paused on a single interceptor rising edge. Stock
+    `gasPressedOverride` still ends on lift so `CC.longActive` goes
+    True; if that edge missed, `requested_long` stayed true and lift
+    ACQUIREd (A+B / A3 climb). Hold `_saw_long_without_gas` so any
+    later gas press is a takeover even when the kick misses.
+    """
+    engagement = getattr(CS, 'engagement', None)
+    one_pedal = bool(getattr(nap_conf, 'one_pedal_long', False)) or bool(
+      getattr(engagement, '_one_pedal_long_on', False))
+    if engagement is not None:
+      latched = bool(getattr(engagement, '_one_pedal_pause_latched', False))
+      CS.one_pedal_pause_latched = latched
+    else:
+      latched = bool(getattr(CS, 'one_pedal_pause_latched', False))
+
+    if not one_pedal or not bool(getattr(CS, 'cruiseEnabled', False)):
+      self._saw_long_without_gas = False
+      return requested_long, False
+
+    # SET (or armed stop-SET) is the intended resume. Do not treat the
+    # still-held accelerator as a new takeover — that re-latched on the
+    # same frame and left long stuck paused. skip_resume also covers
+    # SET-while-gas / engage-while-gas lift-to-start (`_one_pedal_armed_with_gas`)
+    # until interceptor DI is fully off (A+B / A3).
+    skip_resume = bool(
+      getattr(engagement, '_nap_set_resume_long', False)
+      or getattr(engagement, '_nap_resume_wait_gas', False)
+      or getattr(engagement, '_one_pedal_armed_with_gas', False)
+    ) if engagement is not None else False
+    takeover = (
+      bool(self._saw_long_without_gas)
+      and bool(gas_pressed)
+      and not skip_resume
+    )
+    if takeover:
+      if engagement is not None and hasattr(engagement, 'latch_one_pedal_gas_takeover'):
+        engagement.latch_one_pedal_gas_takeover()
+        self._bridge_long_from_engagement(CS)
+      elif engagement is not None:
+        engagement._one_pedal_pause_latched = True
+        if CS.enableLongControl and hasattr(engagement, '_drop_longitudinal_keep_lateral'):
+          engagement._drop_longitudinal_keep_lateral()
+          self._bridge_long_from_engagement(CS)
+      latched = True
+
+    if latched:
+      if engagement is not None and CS.enableLongControl:
+        if hasattr(engagement, '_drop_longitudinal_keep_lateral'):
+          engagement._drop_longitudinal_keep_lateral()
+          self._bridge_long_from_engagement(CS)
+        else:
+          CS.enableLongControl = False
+      requested_long = False
+      self.gas_long_handoff_pending = False
+      # Pause is held by the SET latch. Clearing _saw stops SET-while-gas
+      # (and interceptor-sticky gas after lift) from re-firing takeover
+      # after the overlay has already restored long.
+      self._saw_long_without_gas = False
+    elif skip_resume:
+      self._saw_long_without_gas = bool(CS.enableLongControl) and not bool(gas_pressed)
+    elif CS.enableLongControl:
+      self._saw_long_without_gas = not bool(gas_pressed)
+    else:
+      self._saw_long_without_gas = False
+
+    return requested_long, latched
 
   @staticmethod
   def _handle_pedal_unavailable(CS):
@@ -220,15 +344,31 @@ class PreAPLongController:
     can_sends = []
     actuators = CC.actuators
 
+    gas_pressed = bool(getattr(CS.out, 'gasPressed', False))
     requested_long = CS.cruiseEnabled and CS.enableLongControl
+    requested_long, one_pedal_pause = self._apply_one_pedal_pause(
+      CS, gas_pressed, requested_long)
+    # Held One-Pedal gas-pause: do not command long until SET clears the
+    # latch, even if enableLongControl / CC.longActive glitch true on lift.
+    if one_pedal_pause:
+      requested_long = False
     long_active = requested_long and CC.longActive
     use_pedal = nap_conf.use_pedal
     pedal_factor = float(nap_conf.pedal_factor)
     pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
     pedal_long_allowed = use_pedal and pedal_transform_valid
+    brake_pressed = bool(getattr(CS, 'real_brake_pressed', False))
+    self._update_gas_lift_handoff_state(requested_long, gas_pressed, brake_pressed, CS.out.aEgo)
+    # One-Pedal Long after a gas pause: `_one_pedal_pause_latched` holds
+    # until SET. Software long stays off (same silent pause as brake),
+    # so authority_requested stays false. Interceptor RELEASEs once (gas
+    # press) and stays RELEASED on lift — Tesla physical pedal / stock
+    # lift-regen. Do not re-ACQUIRE on lift (ENABLE 0↔1 chatter) and do
+    # not rewrite GAS_COMMAND DI while ENABLE=1. Brake pause does not
+    # use this latch; brake that drops long RELEASEs immediately.
     if (not long_active
-        or getattr(CS, 'real_brake_pressed', False)
-        or getattr(CS.out, 'gasPressed', False)):
+        or brake_pressed
+        or gas_pressed):
       self.regen_decel_monitor.reset()
 
     requested_long_rising = (not self.prev_requested_long) and requested_long
@@ -255,23 +395,37 @@ class PreAPLongController:
     self.prev_requested_long = requested_long
 
     if frame % 2 == 0:
-      brake_pressed = getattr(CS, 'real_brake_pressed', False)
-      authority_requested = pedal_long_allowed and long_active and not brake_pressed and not CS.out.gasPressed
+      authority_requested = pedal_long_allowed and long_active and not brake_pressed and not gas_pressed
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
       in_engage_grace = False
 
       if pedal_action == PedalCommandAction.ACQUIRE:
-        self.preap_long_engage_frame = frame
         self.preap_long_handoff_slew_active = True
         zero_torque_di = get_zero_torque().get(CS.out.vEgo)
         self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
+        _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
+        # Gas lift after software long was already requested: expire the
+        # 0.5 s a=0 floor so ACQUIRE does not sit in coast. First engage
+        # without prior gas still starts a fresh grace window.
+        gas_handoff = self.gas_long_handoff_pending
+        self.gas_long_handoff_pending = False
+        if gas_handoff:
+          self.preap_long_engage_frame = frame - ENGAGE_GRACE_FRAMES
+          commanded_accel = gas_lift_handoff_seed_accel(
+            self.last_nonneg_a_ego,
+            CS.out.aEgo,
+            self.engage_a_max,
+            float(actuators.accel),
+          )
+        else:
+          self.preap_long_engage_frame = frame
+          commanded_accel = 0.0
         self.vdas.reset(
           measured_accel=CS.out.aEgo,
-          commanded_accel=0.0,
+          commanded_accel=commanded_accel,
           pedal_di_init=self.prev_pedal_di,
           preserve_grade=True,
         )
-        _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
       if use_pedal and pedal_action not in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
         self.vdas.observe(CS.out.aEgo, list(CC.orientationNED))
@@ -319,7 +473,8 @@ class PreAPLongController:
 
           self.prev_pedal_di = self.vdas.update(
             accel_request, CS.out.vEgo, self.prev_pedal_di,
-            a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
+            a_ego=CS.out.aEgo,
+            freeze_integrator=in_engage_grace,
             orientation_ned=list(CC.orientationNED),
             accel_effort_limits=accel_effort_limits,
             pedal_ramp_rate_up=pedal_ramp_rate_up)

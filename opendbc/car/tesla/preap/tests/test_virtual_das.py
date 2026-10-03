@@ -1,6 +1,7 @@
 """Tests for VirtualDAS: JerkLimiter, feedforward, and inner PID."""
 
 import json
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,7 +15,9 @@ from opendbc.car.tesla.preap.ff_table_default import (
 from opendbc.car.tesla.preap.constants import (
   VDAS_EGO_JERK_MAX, VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
 )
-from opendbc.car.tesla.preap.virtual_das import FeedforwardModel, JerkLimiter, VirtualDAS
+from opendbc.car.tesla.preap.virtual_das import (
+  FeedforwardModel, GRAVITY, JerkLimiter, VirtualDAS,
+)
 from opendbc.car.tesla.preap.nap_conf import (
   PEDAL_DI_MIN, PEDAL_DI_ZERO, ACCEL_MAX, REGEN_MAX,
   PEDAL_BP, PEDAL_MAX_VALUES,
@@ -1510,3 +1513,61 @@ class TestVDASDomainBoundaries:
     assert vdas.a_ego_filter.x == pytest.approx(measured_acceleration, abs=0.01)
     assert vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration, abs=0.01)
     assert vdas.jerk_limiter.a_limited == pytest.approx(0.0)
+
+
+def test_vdas_does_not_dump_regen_when_planner_near_zero():
+  """ef 10:18:42: a_cmd ≈ 0 must not let inner PID dump to REGEN_MAX."""
+  from opendbc.car.tesla.preap.virtual_das import (
+    FOLLOW_STEADY_REGEN_FLOOR_MS2,
+    follow_steady_regen_floor,
+  )
+
+  assert follow_steady_regen_floor(0.0) == pytest.approx(FOLLOW_STEADY_REGEN_FLOOR_MS2)
+  assert follow_steady_regen_floor(0.02) == pytest.approx(FOLLOW_STEADY_REGEN_FLOOR_MS2)
+  assert follow_steady_regen_floor(-0.50) is None
+  assert follow_steady_regen_floor(-1.20) is None
+  assert follow_steady_regen_floor(0.25) is None
+  # Grade / pitch hold must not inherit the comfort floor.
+  assert follow_steady_regen_floor(0.0, grade_accel=-0.50) is None
+  assert follow_steady_regen_floor(0.0, grade_accel=0.50) is None
+  assert follow_steady_regen_floor(0.0, pitch_accel=-0.20) is None
+  assert follow_steady_regen_floor(0.0, grade_accel=-0.30) is None
+  assert follow_steady_regen_floor(0.0, grade_accel=-0.05) == pytest.approx(
+    FOLLOW_STEADY_REGEN_FLOOR_MS2
+  )
+
+  vdas = VirtualDAS(dt=0.02)
+  vdas.reset(measured_accel=1.20, commanded_accel=0.0, pedal_di_init=4.0)
+  pedal_di = 4.0
+  for _ in range(40):
+    pedal_di = vdas.update(0.0, v_ego=30.0, prev_pedal_di=pedal_di, a_ego=1.20)
+  assert vdas.prev_accel_effort >= FOLLOW_STEADY_REGEN_FLOOR_MS2 - 1e-9
+  assert vdas.prev_accel_effort > -1.00
+
+  vdas_hard = VirtualDAS(dt=0.02)
+  vdas_hard.reset(measured_accel=0.0, commanded_accel=-1.20, pedal_di_init=0.0)
+  pedal_hard = 0.0
+  for _ in range(40):
+    pedal_hard = vdas_hard.update(-1.20, v_ego=30.0, prev_pedal_di=pedal_hard, a_ego=0.0)
+  assert vdas_hard.prev_accel_effort <= -1.00
+
+  # Downhill grade hold: a_cmd ≈ 0 must still command the needed −a.
+  vdas_grade = VirtualDAS(dt=0.02)
+  downhill = -0.50
+  orientation_ned = [0.0, math.asin(downhill / GRAVITY), 0.0]
+  for _ in range(300):
+    vdas_grade.observe(a_ego=0.0, orientation_ned=orientation_ned)
+  vdas_grade.reset(
+    measured_accel=0.0,
+    commanded_accel=0.0,
+    pedal_di_init=0.0,
+    preserve_grade=True,
+  )
+  pedal_grade = 0.0
+  for _ in range(40):
+    pedal_grade = vdas_grade.update(
+      0.0, v_ego=15.0, prev_pedal_di=pedal_grade, a_ego=0.0,
+      orientation_ned=orientation_ned,
+    )
+  assert vdas_grade.prev_accel_effort == pytest.approx(downhill, abs=0.12)
+  assert vdas_grade.prev_accel_effort < FOLLOW_STEADY_REGEN_FLOOR_MS2 - 0.05

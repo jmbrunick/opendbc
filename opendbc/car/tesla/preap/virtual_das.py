@@ -418,6 +418,40 @@ class FeedforwardModel:
     return base_di
 
 
+# Steady-follow plant floor. When planner aTarget is ~0, inner-PID
+# residual must not dump to REGEN_MAX (ef 10:18:42: act −1.23 then
+# rematch +0.40). Keep in sync with openpilot lead_approach
+# LEAD_FOLLOW_* constants. Planner ≤ −0.5 still has full regen.
+# Grade / pitch hold must keep full −a/+a — do not apply this floor
+# when compensation is active or the grade-adjusted target needs
+# more than mild.
+FOLLOW_STEADY_A_MS2 = 0.08
+FOLLOW_STEADY_REGEN_FLOOR_MS2 = -0.22
+FOLLOW_STEADY_REGEN_CMD_MS2 = -0.50
+
+
+def follow_steady_regen_floor(a_cmd, grade_accel=0.0, pitch_accel=0.0):
+  """MILD regen floor when the planner is coasting, or None if open.
+
+  Skip when grade / pitch compensation is active, or when the
+  grade-adjusted target already needs more than the mild floor.
+  """
+  if a_cmd is None:
+    return None
+  p = float(a_cmd)
+  if p <= FOLLOW_STEADY_REGEN_CMD_MS2:
+    return None
+  if abs(p) > FOLLOW_STEADY_A_MS2:
+    return None
+  g = float(grade_accel)
+  h = float(pitch_accel)
+  if abs(g) > FOLLOW_STEADY_A_MS2 or abs(h) > FOLLOW_STEADY_A_MS2:
+    return None
+  if (p + g + h) <= FOLLOW_STEADY_REGEN_FLOOR_MS2:
+    return None
+  return FOLLOW_STEADY_REGEN_FLOOR_MS2
+
+
 class VirtualDAS:
   """Cascaded longitudinal controller for Pre-AP Tesla pedal control.
 
@@ -479,6 +513,18 @@ class VirtualDAS:
     steady_grade_compensation, transient_pitch_compensation = self.grade_estimator.update(
       orientation_ned if orientation_ned is not None else [])
     effort_min, effort_max = accel_effort_limits or (REGEN_MAX, ACCEL_MAX)
+    # Comfort: do not dump firm regen when the planner is ~0. Caller
+    # limits (engage grace) still win. Planner ≤ −0.5 stays REGEN_MAX.
+    # Grade / pitch hold keeps full authority (downhill −0.50 must
+    # not clip to MILD −0.22).
+    if accel_effort_limits is None:
+      steady_floor = follow_steady_regen_floor(
+        a_cmd,
+        grade_accel=steady_grade_compensation,
+        pitch_accel=transient_pitch_compensation,
+      )
+      if steady_floor is not None:
+        effort_min = max(effort_min, float(steady_floor))
     if not REGEN_MAX <= effort_min <= effort_max <= ACCEL_MAX:
       raise ValueError("acceleration-effort limits exceed the physical control range")
     if not 0.0 <= pedal_ramp_rate_up <= PEDAL_RAMP_RATE_UP:

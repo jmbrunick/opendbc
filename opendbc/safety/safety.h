@@ -53,6 +53,7 @@ bool regen_braking = false;
 bool regen_braking_prev = false;
 bool steering_disengage;
 bool steering_disengage_prev;
+bool steering_disengage_keep_controls;
 bool cruise_engaged_prev = false;
 struct sample_t vehicle_speed;
 bool vehicle_moving = false;
@@ -303,9 +304,9 @@ void gen_crc_lookup_table_8(uint8_t poly, uint8_t crc_lut[]) {
 }
 
 void gen_crc_lookup_table_16(uint16_t poly, uint16_t crc_lut[]) {
-  for (uint16_t i = 0; i < 256U; i++) {
+  for (uint16_t i = 0U; i < 256U; i++) {
     uint16_t crc = i << 8U;
-    for (uint16_t j = 0; j < 8U; j++) {
+    for (uint16_t j = 0U; j < 8U; j++) {
       if ((crc & 0x8000U) != 0U) {
         crc = (uint16_t)((crc << 1) ^ poly);
       } else {
@@ -363,7 +364,7 @@ static void generic_rx_checks(void) {
   regen_braking_prev = regen_braking;
 
   // exit controls on rising edge of steering override/disengage
-  if (steering_disengage && !steering_disengage_prev) {
+  if (steering_disengage && !steering_disengage_prev && !steering_disengage_keep_controls) {
     controls_allowed = false;
   }
   steering_disengage_prev = steering_disengage;
@@ -435,6 +436,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   regen_braking_prev = false;
   steering_disengage = false;
   steering_disengage_prev = false;
+  steering_disengage_keep_controls = false;
   cruise_engaged_prev = false;
   vehicle_moving = false;
   acc_main_on = false;

@@ -26,6 +26,7 @@ jobs:
         source .venv/bin/activate
         ruff check \
           .github/ci/tesla_preap_longitudinal_mutations.py \
+          .github/ci/tesla_preap_lat_yield_mutations.py \
           .github/ci/test_tests_workflow.py \
           opendbc/car/tesla/fingerprints.py \
           opendbc/car/tesla/pedal/controller.py \
@@ -33,6 +34,8 @@ jobs:
           opendbc/car/tesla/test_pedal_regen.py \
           opendbc/safety/tests/test_mg.py \
           opendbc/safety/tests/test_tesla_preap.py \
+          opendbc/safety/tests/test_tesla_preap_blinker.py \
+          opendbc/safety/tests/test_tesla_preap_lat_yield.py \
           opendbc/safety/tests/test_tesla_preap_radar_carconfig.py
     - name: Run NAP car and safety suites
       run: |
@@ -42,7 +45,13 @@ jobs:
           opendbc/car/tesla/test_pedal_regen.py \
           opendbc/safety/tests/test_mg.py \
           opendbc/safety/tests/test_tesla_preap.py \
+          opendbc/safety/tests/test_tesla_preap_blinker.py \
+          opendbc/safety/tests/test_tesla_preap_lat_yield.py \
           opendbc/safety/tests/test_tesla_preap_radar_carconfig.py
+    - name: Run lateral-yield mutation checks
+      run: |
+        source .venv/bin/activate
+        python .github/ci/tesla_preap_lat_yield_mutations.py
 
   tests:
     name: ./test.sh

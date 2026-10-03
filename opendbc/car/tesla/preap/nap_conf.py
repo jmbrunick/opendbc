@@ -22,6 +22,7 @@ CONFIG_FILE = "/data/nap_params.json"
 DEFAULT_CONFIG = {
   'double_pull_window_ms': 400,
   'use_pedal': False,
+  'one_pedal_long': False,
   'pedal_calibrated': False,
   'accel_profile': 'Chill',
   'pedal_can_zero': False,
@@ -54,6 +55,9 @@ def normalize_radar_donor_vin(value):
 PEDAL_DI_MIN = -5       # Max regen (coasting hard)
 PEDAL_DI_ZERO = 0       # Neutral
 PEDAL_DI_PRESSED = 2    # "pedal pressed" threshold
+# One-Pedal Long pause is slightly more sensitive than stock gasPressed so a
+# light tip-in latches. Stock OVERRIDE / gasPressed stays PEDAL_DI_PRESSED.
+ONE_PEDAL_GAS_DI_PRESSED = 1.0
 
 ACCEL_MAX = 2.5         # m/s^2
 REGEN_MAX = -1.5        # m/s^2
@@ -193,6 +197,11 @@ class NAPConf:
     self._put(json_key, text)
 
   # Bool properties
+
+  @property
+  def one_pedal_long(self):
+    """Mannerisms One-Pedal Long. Default Off. Missing / test double → Off."""
+    return self._get_param_bool(NAPParamKeys.ONE_PEDAL_LONG, 'one_pedal_long', False)
 
   @property
   def use_pedal(self):

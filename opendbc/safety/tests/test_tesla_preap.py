@@ -153,6 +153,17 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     }
     return self.packer.make_can_msg_safety("GTW_carState", 0, values)
 
+  def _active_steer_tx(self, t_us):
+    """Allowed DAS_steeringControlType=1 at t_us: openpilot is steering (A).
+
+    A hands-on >= 2 edge cancels only while an active steering request
+    went out within 100 ms and no re-arm grace is running. Use the
+    caller's clock, not the shared command counter.
+    """
+    self.safety.set_timer(t_us)
+    self._rx(self._angle_meas_msg(0))
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, 1, increment_timer=False)))
+
   def _engage_and_advance_timer(self):
     """Engage via stalk and advance timer past the 600ms echo filter window."""
     self._rx(self._pcm_status_msg(True))
@@ -267,20 +278,106 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def test_gear_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
     self._rx(self._gear_msg(0))
     self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
     self._rx(self._gear_msg(4))
     self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_reverse_then_drive_set_reengages_without_latch(self):
+    """Leave Drive (R) must clear cruise_engaged_prev so the next SET allows.
+
+    The old path set controls_allowed=false only. cruise_engaged_prev
+    stayed true, so Drive SET was not a rising edge; controlsMismatch.
+    """
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._gear_msg(2))  # Reverse
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._gear_msg(4))  # Drive
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+
+  def test_park_then_drive_set_reengages_without_latch(self):
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._gear_msg(1))  # Park
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._gear_msg(4))  # Drive
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_leftover_latch_clears_while_still_in_reverse(self):
+    """Primary re-arm is while NOT in Drive. Leftover cruise_engaged_prev
+    must die on a later Reverse 0x118, before Drive return.
+    """
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._gear_msg(2))  # Reverse
+    self.safety.set_controls_allowed(False)
+    self.safety.set_cruise_engaged_prev(True)
+    self._rx(self._gear_msg(2))  # still Reverse — latch must clear here
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._gear_msg(4))  # Drive — not the primary clear
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_drive_set_rearms_leftover_latch_without_extra_cancel(self):
+    """Last-resort: Drive SET while !allowed is cancel-then-SET."""
+    self._rx(self._pcm_status_msg(True))
+    self.safety.set_controls_allowed(False)
+    self.safety.set_cruise_engaged_prev(True)
+    # Already in Drive. No RX CANCEL. SET must still allow.
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+
+  def test_tx_cancel_clears_latch_only_when_already_disallowed(self):
+    """TX CANCEL spoof must re-arm when OP is already down, not drop an
+    in-session first-pull / brake-pause stock-CC cancel."""
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(self._pcm_status_msg(False)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+
+    self.safety.set_controls_allowed(False)
+    self.safety.set_cruise_engaged_prev(True)
+    self.assertTrue(self._tx(self._pcm_status_msg(False)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_set_while_already_allowed_does_not_drop(self):
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
 
   def test_door_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._door_msg(door_fl=1))
     self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_cruise_engaged_prev())
 
   def test_steering_disengage_hands_on(self):
+    # A: openpilot is steering when the hands-on edge arrives.
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+    self._active_steer_tx(1000000)
     self._rx(self._angle_meas_msg(0, hands_on_level=1))
     self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
@@ -295,6 +392,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
       self._setup_safety_hooks()
       self._rx(self._pcm_status_msg(True))
       self.assertTrue(self.safety.get_controls_allowed(), f"Setup failed for error code {error_code}")
+      self._active_steer_tx(1000000)  # A: openpilot is steering
       self._rx(self._angle_meas_msg(0, hands_on_level=0, eac_status=0, eac_error_code=error_code))
       self.assertFalse(self.safety.get_controls_allowed(), f"Error code {error_code} should disengage")
 
@@ -321,6 +419,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def test_stalk_rearm_after_steering_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
+    self._active_steer_tx(1000000)
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_cruise_engaged_prev())
@@ -493,6 +592,20 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self.assertTrue(self.safety.get_controls_allowed())
     msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 1})
     self.assertTrue(self._tx(msg))
+
+  def test_pedal_enable_allowed_after_reverse_drive_set(self):
+    """R/P must not leave interceptor ENABLE blocked on a clean Drive SET."""
+    enable = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 1})
+    disable = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 0})
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self._tx(enable))
+    self._rx(self._gear_msg(2))  # Reverse
+    self.assertFalse(self._tx(enable))
+    self.assertTrue(self._tx(disable))  # RELEASE still allowed
+    self._rx(self._gear_msg(4))  # Drive
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(enable))
 
   def test_pedal_blocked_without_controls(self):
     self.assertFalse(self.safety.get_controls_allowed())

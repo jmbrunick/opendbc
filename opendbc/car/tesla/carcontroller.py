@@ -95,13 +95,25 @@ class CarController(CarControllerBase):
     actuators = CC.actuators
     can_sends = []
 
-    lat_active = CC.latActive and CS.hands_on_level < 3
+    lat_yield = CS.engagement.lat_yield
+    # A B-edge (hands-on while lateral was yielded) refuses active steering
+    # until the hands release, same as panda; type 0 frames keep flowing.
+    lat_active = CC.latActive and CS.hands_on_level < 3 and not lat_yield.blocked
 
     if self.frame % 2 == 0:
       self.apply_angle_last = apply_steer_angle_limits_vm(actuators.steeringAngleDeg, self.apply_angle_last, CS.out.vEgoRaw, CS.out.steeringAngleDeg,
                                                           lat_active, CarControllerParams, self.VM)
       cntr = (self.frame // 2) % 16
       can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
+      # Stamp what actually goes on the wire: decides A (full control, a
+      # hands-on edge cancels) vs B (yielded, it does not). Panda infers the
+      # same thing from these very 0x488 frames; no status bit is sent.
+      # INFERENCE CONTRACT: type 1 must mean "OP is steering", and only that.
+      # Any change to lateral transitions / handoff timing / a new lateral
+      # release or re-arm path must update preap/lat_yield.py and
+      # tesla_preap_latyield.h (see the module docstring), or a driver
+      # maneuver cancels OP (or a real yank is ignored).
+      lat_yield.note_steer_tx(bool(lat_active), engaged=bool(CS.engagement.cruiseEnabled))
       can_sends.append(self.tesla_can.create_epas_control(cntr, 1))
 
     # Reset pccEvent each tick so it expresses one-frame edge events. Without

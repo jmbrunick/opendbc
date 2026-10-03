@@ -67,8 +67,13 @@ class TestWorkflowContract(unittest.TestCase):
       ("    - name: Run NAP car and safety suites", (
         "opendbc/car/tesla/preap/tests/",
         "opendbc/safety/tests/test_tesla_preap.py",
+        "opendbc/safety/tests/test_tesla_preap_blinker.py",
+        "opendbc/safety/tests/test_tesla_preap_lat_yield.py",
         "opendbc/safety/tests/test_tesla_preap_radar_carconfig.py",
         "opendbc/safety/tests/test_mg.py",
+      )),
+      ("    - name: Run lateral-yield mutation checks", (
+        "python .github/ci/tesla_preap_lat_yield_mutations.py",
       )),
     )
 
