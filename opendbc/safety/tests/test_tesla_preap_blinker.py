@@ -42,6 +42,9 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     return self.packer.make_can_msg_safety(
       "STW_ACTN_RQ", 0, {"TurnIndLvr_Stat": stalk, "SpdCtrlLvr_Stat": lever})
 
+  def _active_steer_tx(self, t_us):
+    return self.base._active_steer_tx(t_us)
+
   def _engage_past_echo(self, t_us=1000000):
     """Engage via stalk and park the timer past the 600ms echo filter."""
     self._rx(self._pcm_status_msg(True))
@@ -104,6 +107,7 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self._rx(self._gtw_blinker_msg(left=0, right=0))
     self.safety.set_timer(t + 10000 + 1000000)
     self._rx(self._gtw_blinker_msg(left=0, right=0))
+    self._active_steer_tx(t + 10000 + 1000000)  # A: openpilot steering again
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
 
@@ -124,12 +128,14 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._angle_meas_msg(0, hands_on_level=0))
     self.assertTrue(self.safety.get_controls_allowed())
+    self._active_steer_tx(t + 10000 + 1000000)  # A: openpilot steering
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
 
   def test_hazards_do_not_keep_controls(self):
     self._engage_past_echo()
     self._rx(self._gtw_blinker_msg(left=1, right=1))
+    self._active_steer_tx(1000000)  # A: openpilot steering
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
 
@@ -138,6 +144,7 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self._rx(self._gtw_blinker_msg(left=1))
     self.safety.set_timer(t + 100000)
     self._rx(self._gtw_blinker_msg(left=1, right=1))
+    self._active_steer_tx(t + 100000)  # A: openpilot steering
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
 
@@ -158,6 +165,7 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self._rx(self._gtw_blinker_msg(left=0, right=0))
     self.safety.set_timer(t + 1600000)
     self._rx(self._gtw_blinker_msg(left=0, right=0))
+    self._active_steer_tx(t + 1600000)  # A: openpilot steering
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
 
@@ -218,6 +226,7 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self._engage_past_echo()
     self._rx(self._gtw_blinker_msg(left=0, right=0))
     self._rx(self._stw_turn_msg(stalk=0))
+    self._active_steer_tx(1000000)  # A: openpilot steering
     self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
 
@@ -229,6 +238,7 @@ class TestTeslaPreAPBlinkerTurn(unittest.TestCase):
     self.safety.set_timer(t + 200000)
     self._rx(self._stw_turn_msg(stalk=0))
     self._rx(self._gtw_blinker_msg(left=0, right=0))
+    self._active_steer_tx(t + 200000)  # A: openpilot steering the lane change
     self._rx(self._angle_meas_msg(0, hands_on_level=3))
     self.assertFalse(self.safety.get_controls_allowed())
 
