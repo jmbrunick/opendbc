@@ -26,6 +26,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
   bool violation = false;
+  bool active_steer_tx = false;
 
   // Host→panda donor VIN/config. Intercept; do not put 0x560 on the car.
   if (msg->addr == PREAP_RADAR_VIN_ADDR) {
@@ -62,6 +63,12 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     if ((steer_control_type != 0) && (steer_control_type != 1)) {
       violation = true;
     }
+    // B edge (hands-on while lateral was yielded): no active steering until
+    // the hands release. Type 0 (release) always passes.
+    if (steer_control_enabled && preap_lat_block) {
+      violation = true;
+    }
+    active_steer_tx = steer_control_enabled;
   }
 
   // EPB_epasControl (0x214): only allow valid EAC modes (0=disable, 1=enable)
@@ -164,6 +171,8 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
 
   if (violation) {
     tx = false;
+  } else if (active_steer_tx) {
+    preap_lat_note_active_tx();
   }
   return tx;
 }
