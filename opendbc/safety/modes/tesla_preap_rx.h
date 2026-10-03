@@ -48,12 +48,24 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     preap_steering_disengage = steering_disengage;
     preap_hands_on_level = hands_on_level;
     preap_update_blinker_hold();
+    preap_lat_yield_tick();
+    preap_lat_block_update(steering_disengage);
 
     // Re-arm fix: force cruise_engaged_prev reset on steering disengage
-    // so next stalk pull creates a clean rising edge
+    // so next stalk pull creates a clean rising edge.
+    // A: openpilot was in full control of lateral -> a yank cancels.
+    // B: lateral was yielded to the driver (no active steering request
+    //    recently sent, or inside the re-arm grace) -> the wheel input is
+    //    a driver maneuver. Keep controls_allowed (long stays engaged)
+    //    and refuse active steering until the hands release.
     if (steering_disengage && !steering_disengage_prev) {
       if (!preap_blinker_turn_blocks_disengage()) {
-        pcm_cruise_check(false);
+        if (!controls_allowed || preap_lat_in_full_control()) {
+          pcm_cruise_check(false);
+        } else {
+          preap_lat_block = true;
+          preap_lat_block_clearing = false;
+        }
       }
     }
   }
@@ -165,8 +177,14 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     controls_allowed = false;
   }
 
+  // Disengaged: forget the lateral history (next session starts without grace).
+  if (!controls_allowed) {
+    preap_lat_yield_reset();
+  }
+
   // generic_rx_checks runs after this hook and drops on a steering_disengage
-  // rising edge. Publish the blinker-turn hold so that path matches
-  // pcm_cruise_check and Python blinker_turn_blocks_steering_disengage.
-  steering_disengage_keep_controls = controls_allowed && preap_blinker_turn_blocks_disengage();
+  // rising edge. Publish the blinker-turn hold and the lateral-yielded (B)
+  // state so that path matches pcm_cruise_check and the Python card.
+  steering_disengage_keep_controls = controls_allowed &&
+    (preap_blinker_turn_blocks_disengage() || !preap_lat_in_full_control());
 }
