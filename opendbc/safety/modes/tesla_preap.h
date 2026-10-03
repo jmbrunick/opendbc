@@ -43,6 +43,11 @@
 //     blinker-latched driver turn in tesla_preap_blinker.h (one lamp XOR,
 //     physical LEFT/RIGHT, flash-latched ~1s, then hand-on until release).
 //     ALC keep-alive flashes and hazards are not a driver turn.
+//     Also except while lateral is yielded (tesla_preap_latyield.h: no
+//     active DAS_steeringControl allowed for 100 ms, or inside the 1.2 s
+//     re-arm grace): the wheel input is then a driver maneuver, not an
+//     override of openpilot steering. Active steering is blocked until
+//     the hands release.
 //   - Disengage on EPAS error codes 6-9, except during that same turn
 //   - Disengage on door open, gear out of Drive via pcm_cruise_check(false)
 //     *while not in Drive* so cruise_engaged_prev is already clear before
@@ -127,6 +132,7 @@ static uint32_t preap_last_stalk_engage_us = 0;
 
 
 #include "opendbc/safety/modes/tesla_preap_blinker.h"
+#include "opendbc/safety/modes/tesla_preap_latyield.h"
 #include "opendbc/safety/modes/tesla_preap_radar.h"
 #include "opendbc/safety/modes/tesla_preap_rx.h"
 
@@ -167,6 +173,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_last_radar_signal = 0;
   preap_last_stalk_engage_us = 0;
   preap_reset_blinker_hold();
+  preap_lat_yield_reset();
   preap_radar_position = 0;
   preap_radar_epas_type = 0;
   preap_radar_vin_complete = 0;
