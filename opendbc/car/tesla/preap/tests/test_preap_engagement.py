@@ -748,8 +748,21 @@ class TestOnePedalLongGasKick(unittest.TestCase):
     self.assertFalse(eng._one_pedal_pause_latched)
 
   def test_light_tip_in_after_rest_still_pauses_with_di(self):
-    """DI 1.2 from rest is still a One-Pedal takeover."""
+    """DI 1.2 from rest is still a One-Pedal takeover.
+
+    Unfiltered, one sample pauses. The openpilot gas-blip filter (same
+    method, once installed) waits five control frames unless the sample
+    is firm. A real light press still pauses; a shorter reading does not.
+    """
     eng = self._long_at_rest(self._engaged())
+    filtered = getattr(
+      type(eng).maybe_one_pedal_gas_kick, "__name__", "") == "_filtered_one_pedal_gas_kick"
+    if filtered:
+      for i in range(4):
+        eng._gas_blip_clock = 0.01 * (i + 1)
+        self.assertFalse(self._overlay_kick_cycle(eng, False, 1.2))
+        self.assertTrue(eng.enableLongControl)
+      eng._gas_blip_clock = 0.05
     self.assertTrue(self._overlay_kick_cycle(eng, False, 1.2))
     self.assertFalse(eng.enableLongControl)
     self.assertTrue(eng._one_pedal_pause_latched)
