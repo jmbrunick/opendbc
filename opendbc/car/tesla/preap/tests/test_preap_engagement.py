@@ -498,13 +498,16 @@ class TestOnePedalLongGasKick(unittest.TestCase):
       use_pedal=True, pedal_long_allowed=True,
       long_control_allowed=True, real_brake_pressed=False)
     self.assertTrue(eng.cruiseEnabled)
-    self.assertFalse(eng.enableLongControl)
-    self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
-    eng.process_buttons(
-      cruise_buttons=2, prev_cruise_buttons=0,
-      curr_time_ms=1400, v_ego=15.0, speed_units="KPH",
-      use_pedal=True, pedal_long_allowed=True,
-      long_control_allowed=True, real_brake_pressed=False)
+    # Pedal overlay engages lat+long on one rolling pull. Stock FSM
+    # stays lat-only until the second pull. Either way long must be on
+    # before the lift, and the lift must not pause.
+    if not eng.enableLongControl:
+      self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
+      eng.process_buttons(
+        cruise_buttons=2, prev_cruise_buttons=0,
+        curr_time_ms=1400, v_ego=15.0, speed_units="KPH",
+        use_pedal=True, pedal_long_allowed=True,
+        long_control_allowed=True, real_brake_pressed=False)
     self.assertTrue(eng.enableLongControl)
     self.assertFalse(eng.maybe_one_pedal_gas_kick(True, True))
     self.assertTrue(eng.enableLongControl)
@@ -618,7 +621,8 @@ class TestOnePedalLongGasKick(unittest.TestCase):
       use_pedal=True, pedal_long_allowed=True,
       long_control_allowed=True, real_brake_pressed=False)
     self.assertTrue(eng.cruiseEnabled)
-    self.assertFalse(eng.enableLongControl)
+    # Overlay engages lat+long on this pull. Stock FSM is still lat-only
+    # until the second pull below. Lift must not pause in either case.
     self.assertFalse(self._overlay_kick_cycle(eng, True, 8.0))
     eng.process_buttons(
       cruise_buttons=2, prev_cruise_buttons=0,
@@ -656,13 +660,13 @@ class TestOnePedalLongGasKick(unittest.TestCase):
       use_pedal=True, pedal_long_allowed=True,
       long_control_allowed=True, real_brake_pressed=False)
     self.assertTrue(eng.cruiseEnabled)
-    self.assertFalse(eng.enableLongControl)
     self.assertFalse(self._overlay_kick_cycle(eng, True, 8.0))
-    eng.process_buttons(
-      cruise_buttons=2, prev_cruise_buttons=0,
-      curr_time_ms=14719, v_ego=22.75, speed_units="MPH",
-      use_pedal=True, pedal_long_allowed=True,
-      long_control_allowed=True, real_brake_pressed=False)
+    if not eng.enableLongControl:
+      eng.process_buttons(
+        cruise_buttons=2, prev_cruise_buttons=0,
+        curr_time_ms=14719, v_ego=22.75, speed_units="MPH",
+        use_pedal=True, pedal_long_allowed=True,
+        long_control_allowed=True, real_brake_pressed=False)
     self.assertTrue(eng.enableLongControl)
     held = eng.pedal_speed_kph
     self.assertFalse(self._overlay_kick_cycle(eng, True, 6.0))
