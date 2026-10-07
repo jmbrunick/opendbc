@@ -27,10 +27,21 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   bool tx = true;
   bool violation = false;
   bool active_steer_tx = false;
+  bool note_cmd_angle = false;
+  int noted_cmd_angle = 0;
 
   // Host→panda donor VIN/config. Intercept; do not put 0x560 on the car.
   if (msg->addr == PREAP_RADAR_VIN_ADDR) {
     preap_apply_radar_vin_msg(msg);
+    return false;
+  }
+
+  // Host→panda yield context (roundabout / under-track). Not a yielded bit
+  // and not an actuation allowance. Never forwarded onto the car.
+  if (msg->addr == PREAP_LAT_FLAG_ADDR) {
+    if (GET_LEN(msg) == 1U) {
+      preap_lat_note_flag(msg->data[0]);
+    }
     return false;
   }
 
@@ -69,6 +80,10 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       violation = true;
     }
     active_steer_tx = steer_control_enabled;
+    if (steer_control_enabled) {
+      note_cmd_angle = true;
+      noted_cmd_angle = desired_angle;
+    }
   }
 
   // EPB_epasControl (0x214): only allow valid EAC modes (0=disable, 1=enable)
@@ -172,6 +187,10 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   if (violation) {
     tx = false;
   } else if (active_steer_tx) {
+    // Only an allowed type-1 frame is the command the help check compares.
+    if (note_cmd_angle) {
+      preap_lat_note_cmd_angle(noted_cmd_angle);
+    }
     preap_lat_note_active_tx();
   }
   return tx;

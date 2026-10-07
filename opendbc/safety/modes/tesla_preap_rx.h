@@ -32,6 +32,9 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   if (msg->addr == 0x370U) {
     const int angle_meas_new = (((msg->data[4] & 0x3FU) << 8) | msg->data[5]) - 8192U;
     update_sample(&angle_meas, angle_meas_new);
+    // Torsion raw 0 is -20.5 Nm. Store raw-2050 so 0 Nm is 0 (0.01 Nm units).
+    const int torsion_raw = ((msg->data[2] & 0x0FU) << 8) | msg->data[3];
+    preap_lat_note_meas(angle_meas_new, torsion_raw - 2050);
 
     const int hands_on_level = msg->data[4] >> 6;
     const int eac_status = msg->data[6] >> 5;
@@ -58,9 +61,13 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     //    recently sent, or inside the re-arm grace) -> the wheel input is
     //    a driver maneuver. Keep controls_allowed (long stays engaged)
     //    and refuse active steering until the hands release.
+    // Same-direction help, or a roundabout flag, turns a hands-on edge into
+    // a lateral yield. An opposite yank while OP has full lateral still
+    // cancels. EPAS reject with hands off never takes the yield path.
+    const bool yield_instead = preap_lat_yield_instead(hands_on_level);
     if (steering_disengage && !steering_disengage_prev) {
       if (!preap_blinker_turn_blocks_disengage()) {
-        if (!controls_allowed || preap_lat_in_full_control()) {
+        if (!controls_allowed || (preap_lat_in_full_control() && !yield_instead)) {
           pcm_cruise_check(false);
         } else {
           preap_lat_block = true;
@@ -186,5 +193,6 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   // rising edge. Publish the blinker-turn hold and the lateral-yielded (B)
   // state so that path matches pcm_cruise_check and the Python card.
   steering_disengage_keep_controls = controls_allowed &&
-    (preap_blinker_turn_blocks_disengage() || !preap_lat_in_full_control());
+    (preap_blinker_turn_blocks_disengage() || !preap_lat_in_full_control() ||
+     preap_lat_yield_instead(preap_hands_on_level));
 }

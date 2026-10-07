@@ -32,6 +32,12 @@
 // selfdrive/controls/lib/tests/test_lat_yield_inference_guard.py in openpilot).
 // Reflash the panda after changing anything here.
 //
+// Host-only 0x561 is not a "lateral yielded" announcement and is not part
+// of the inference above. It only widens a hands-on edge from "cancel" to
+// "block lateral, keep controls_allowed" (roundabout, or under-tracking
+// when torque matches the wheel). It cannot enable actuation, raise a
+// limit, or keep latActive. Stale after PREAP_LAT_FLAG_TIMEOUT_US.
+//
 // The Python card mirrors this (opendbc/car/tesla/preap/lat_yield.py).
 // Python MUST be the more eager side to cancel (longer recent window,
 // shorter grace) so panda alone never drops controls_allowed while
@@ -51,6 +57,16 @@
 // disengage level, so a stale request cannot re-grab a releasing wheel.
 #define PREAP_LAT_BLOCK_CLEAR_US  150000U
 
+// Angle-error / torque deadbands. 10 = 1.0 deg (0.1 deg units), 30 = 0.30 Nm
+// (0.01 Nm units). Inside the deadband the sign is ambiguous: not "help".
+#define PREAP_ANGLE_HELP_DEADBAND 10
+#define PREAP_TORQUE_DIR_DEADBAND 30
+#define PREAP_LAT_FLAG_ADDR       0x561U
+#define PREAP_LAT_FLAG_TIMEOUT_US 250000U
+#define PREAP_LAT_FLAG_MAGIC      0xA0U
+#define PREAP_LAT_FLAG_ROUNDABOUT 0x01U
+#define PREAP_LAT_FLAG_UNDERTRACK 0x02U
+
 static bool preap_lat_seen = false;          // an active frame was allowed this session
 static uint32_t preap_lat_last_us = 0U;      // time of the last allowed active frame
 static bool preap_lat_gap = false;           // the active stream lapsed since that frame
@@ -59,6 +75,17 @@ static uint32_t preap_lat_grace_start_us = 0U;
 static bool preap_lat_block = false;         // B edge: no active steering until hands release
 static bool preap_lat_block_clearing = false;
 static uint32_t preap_lat_block_clear_since_us = 0U;
+// Last allowed type-1 command and the latest EPAS angle / torsion, CAN frame
+// (0.1 deg, 0.01 Nm, 0 = 0). Signs match the carState frame, so help does
+// not depend on which side negates them.
+static bool preap_lat_cmd_valid = false;
+static int preap_lat_cmd_angle = 0;
+static int preap_lat_meas_angle = 0;
+static int preap_lat_torque = 0;
+static bool preap_lat_flag_seen = false;
+static uint32_t preap_lat_flag_us = 0U;
+static bool preap_lat_flag_roundabout = false;
+static bool preap_lat_flag_undertrack = false;
 
 static void preap_lat_yield_reset(void) {
   preap_lat_seen = false;
@@ -69,6 +96,14 @@ static void preap_lat_yield_reset(void) {
   preap_lat_block = false;
   preap_lat_block_clearing = false;
   preap_lat_block_clear_since_us = 0U;
+  preap_lat_cmd_valid = false;
+  preap_lat_cmd_angle = 0;
+  preap_lat_meas_angle = 0;
+  preap_lat_torque = 0;
+  preap_lat_flag_seen = false;
+  preap_lat_flag_us = 0U;
+  preap_lat_flag_roundabout = false;
+  preap_lat_flag_undertrack = false;
 }
 
 // Called from the RX path (EPAS 25 Hz) so the 32-bit microsecond timer
@@ -128,4 +163,72 @@ static void preap_lat_block_update(bool steering_disengage_now) {
     preap_lat_block = false;
     preap_lat_block_clearing = false;
   }
+}
+
+static void preap_lat_note_cmd_angle(int desired_angle_can) {
+  preap_lat_cmd_valid = true;
+  preap_lat_cmd_angle = desired_angle_can;
+}
+
+static void preap_lat_note_meas(int angle_can, int torque_can) {
+  preap_lat_meas_angle = angle_can;
+  preap_lat_torque = torque_can;
+}
+
+static int preap_lat_sign(int value, int deadband) {
+  if (value > deadband) return 1;
+  if (value < -deadband) return -1;
+  return 0;
+}
+
+static bool preap_lat_flag_fresh(void) {
+  if (!preap_lat_flag_seen) {
+    return false;
+  }
+  return (microsecond_timer_get() - preap_lat_flag_us) <= PREAP_LAT_FLAG_TIMEOUT_US;
+}
+
+// Torque helps the last allowed command, or (flag only) matches the wheel
+// while the planner says OP is under-tracking. Deadband is not help.
+static bool preap_lat_torque_helps(void) {
+  const int tsign = preap_lat_sign(preap_lat_torque, PREAP_TORQUE_DIR_DEADBAND);
+  if (tsign == 0) {
+    return false;
+  }
+  if (preap_lat_cmd_valid) {
+    const int esign = preap_lat_sign(preap_lat_cmd_angle - preap_lat_meas_angle, PREAP_ANGLE_HELP_DEADBAND);
+    if ((esign != 0) && (esign == tsign)) {
+      return true;
+    }
+  }
+  if (preap_lat_flag_fresh() && preap_lat_flag_undertrack) {
+    const int wsign = preap_lat_sign(preap_lat_meas_angle, PREAP_ANGLE_HELP_DEADBAND);
+    if ((wsign != 0) && (wsign == tsign)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Hands-on (not an EPAS reject with hands off) should yield instead of cancel.
+static bool preap_lat_yield_instead(int hands_on_level) {
+  if (hands_on_level < 2) {
+    return false;
+  }
+  if (preap_lat_flag_fresh() && preap_lat_flag_roundabout) {
+    return true;
+  }
+  return preap_lat_torque_helps();
+}
+
+// 0x561 byte. Magic high nibble, reserved bits clear, else ignored.
+// Always called only for a message that will not be forwarded.
+static void preap_lat_note_flag(uint8_t byte) {
+  if (((byte & 0xF0U) != PREAP_LAT_FLAG_MAGIC) || ((byte & 0x0CU) != 0U)) {
+    return;
+  }
+  preap_lat_flag_seen = true;
+  preap_lat_flag_us = microsecond_timer_get();
+  preap_lat_flag_roundabout = (byte & PREAP_LAT_FLAG_ROUNDABOUT) != 0U;
+  preap_lat_flag_undertrack = (byte & PREAP_LAT_FLAG_UNDERTRACK) != 0U;
 }

@@ -164,3 +164,128 @@ class LatYieldTracker:
     elif (now - self._clear_since) >= BLOCK_CLEAR_S:
       self._block = False
       self._clear_since = None
+
+
+# Same-direction push and roundabout context. These widen "hands-on is a
+# yield, not a session cancel". They never grant actuation.
+#
+# Helps OP when sign(torque) == sign(commanded angle - measured angle),
+# both in the carState frame (positive torque / angle = left). A driver
+# who is already ahead of a lagging command has the opposite angle error;
+# then the same sign as the wheel counts, but only while OP is
+# under-tracking (|desired curvature - actual| > UNDERTRACK_CURVATURE).
+# Below the deadbands the sign is ambiguous and is not help: a real yank
+# still cancels.
+UNDERTRACK_CURVATURE = 0.001  # 1/m
+ANGLE_HELP_DEADBAND_DEG = 1.0
+TORQUE_DIR_DEADBAND_NM = 0.30
+ROUNDABOUT_YIELD_M = 40.0
+
+# Host-only CAN. Panda consumes it and does not forward it. Magic high
+# nibble 0xA; bit0 roundabout (any hands-on yields); bit1 under-tracking
+# (yield when torque matches the wheel). Other low bits must be 0 or the
+# byte is ignored. A stale flag times out in panda (250 ms).
+YIELD_FLAG_ADDR = 0x561
+YIELD_FLAG_MAGIC = 0xA0
+FLAG_ROUNDABOUT = 0x01
+FLAG_UNDERTRACK = 0x02
+
+
+def _sign(value: float, deadband: float) -> int:
+  if value > deadband:
+    return 1
+  if value < -deadband:
+    return -1
+  return 0
+
+
+def torque_helps_op(torque_nm, commanded_angle_deg, measured_angle_deg, *,
+                    undertrack: bool = False) -> bool:
+  """True when driver torque is pushing the same way OP is steering.
+
+  ``commanded_angle_deg`` / ``measured_angle_deg`` are carState steering
+  angles (positive left). ``commanded_angle_deg`` None means OP has not
+  published a type-1 angle yet: angle-error help is unavailable.
+  """
+  try:
+    torque = float(torque_nm)
+    measured = float(measured_angle_deg)
+  except (TypeError, ValueError):
+    return False
+  tsign = _sign(torque, TORQUE_DIR_DEADBAND_NM)
+  if tsign == 0:
+    return False
+  if commanded_angle_deg is not None:
+    try:
+      err = float(commanded_angle_deg) - measured
+    except (TypeError, ValueError):
+      err = None
+    else:
+      esign = _sign(err, ANGLE_HELP_DEADBAND_DEG)
+      if esign != 0 and esign == tsign:
+        return True
+  if undertrack:
+    wsign = _sign(measured, ANGLE_HELP_DEADBAND_DEG)
+    if wsign != 0 and wsign == tsign:
+      return True
+  return False
+
+
+def roundabout_yield_context(on_roundabout, approaching, distance_m) -> bool:
+  """approachingRoundabout within 40 m, or already on the ring."""
+  if on_roundabout:
+    return True
+  if not approaching:
+    return False
+  try:
+    return float(distance_m) <= ROUNDABOUT_YIELD_M
+  except (TypeError, ValueError):
+    return False
+
+
+def hands_edge_is_yield(*, hands, torque_nm, commanded_angle_deg, measured_angle_deg,
+                        undertrack: bool = False, roundabout: bool = False) -> bool:
+  """A hands-on disengage edge should yield lateral instead of ending the session.
+
+  Hands below the disengage level never yield: an EPAS reject with hands
+  off still cancels. On a roundabout, any hands-on yields. Otherwise only
+  torque that helps OP.
+  """
+  try:
+    if int(hands) < 2:
+      return False
+  except (TypeError, ValueError):
+    return False
+  if roundabout:
+    return True
+  return torque_helps_op(
+    torque_nm, commanded_angle_deg, measured_angle_deg, undertrack=undertrack)
+
+
+def immediate_lat_yield(*, hands, torque_nm, commanded_angle_deg, measured_angle_deg,
+                        undertrack: bool = False, roundabout: bool = False,
+                        steering_pressed: bool = False) -> bool:
+  """Handoff should enter yield on this frame, before the 80 ms counters.
+
+  Roundabout: any hands-on or steeringPressed. Elsewhere: a hands-on edge
+  whose torque helps OP. An opposite yank is not this path.
+  """
+  try:
+    hands_i = int(hands)
+  except (TypeError, ValueError):
+    hands_i = 0
+  if roundabout and (hands_i >= 2 or bool(steering_pressed)):
+    return True
+  return hands_edge_is_yield(
+    hands=hands_i, torque_nm=torque_nm, commanded_angle_deg=commanded_angle_deg,
+    measured_angle_deg=measured_angle_deg, undertrack=undertrack, roundabout=False)
+
+
+def encode_yield_flag(roundabout: bool, undertrack: bool) -> bytes:
+  """One-byte host→panda context. Never forwarded onto the car."""
+  value = YIELD_FLAG_MAGIC
+  if roundabout:
+    value |= FLAG_ROUNDABOUT
+  if undertrack:
+    value |= FLAG_UNDERTRACK
+  return bytes((value & 0xFF,))

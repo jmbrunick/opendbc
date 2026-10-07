@@ -289,6 +289,123 @@ class _LatYieldMixin:
     self.assertTrue(self._steer(T0 + 2000000))  # no stale block after re-engage
 
 
+  def _epas(self, angle, hands, torque=0.0, eac_status=1, eac_error_code=0):
+    values = {
+      "EPAS_internalSAS": angle,
+      "EPAS_handsOnLevel": hands,
+      "EPAS_eacStatus": eac_status,
+      "EPAS_eacErrorCode": eac_error_code,
+      "EPAS_torsionBarTorque": torque,
+      "EPAS_sysStatusCounter": self.base.__class__.cnt_epas % 16,
+    }
+    self.base.__class__.cnt_epas += 1
+    self.cur_hands = hands
+    return self.packer.make_can_msg_safety(
+      "EPAS_sysStatus", 0, values, fix_checksum=preap_tests._fix_epas_checksum)
+
+  def _flag(self, bits):
+    from opendbc.safety.tests.libsafety import libsafety_py
+    return self._tx(libsafety_py.make_CANPacket(0x561, 0, bytes([0xA0 | (bits & 0x03)])))
+
+  def _ramp_cmd(self, t, angle, meas=0.0):
+    """Step a type-1 command out to ``angle`` deg. Returns the time of the last allowed frame."""
+    for _ in range(8):
+      self._rx(self.base._speed_msg(10.0))
+    cur = 0.0
+    last = t
+    # ~0.25 deg/frame stays inside the ISO jerk limit at this speed.
+    for i in range(80):
+      if abs(angle - cur) < 0.05:
+        cur = angle
+      elif angle > cur:
+        cur = min(angle, cur + 0.25)
+      else:
+        cur = max(angle, cur - 0.25)
+      last = t + i * 20000
+      self.safety.set_timer(last)
+      self._rx(self._epas(meas, 0))
+      self.assertTrue(self._tx(self.base._angle_cmd_msg(cur, 1, increment_timer=False)), cur)
+      if cur == angle and i > 0:
+        break
+    return last
+
+  def test_same_direction_push_yields_and_blocks_steer(self):
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=0.0)
+    self.safety.set_timer(t + 20000)
+    self._rx(self._epas(0.0, 3, torque=2.0))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_cruise_engaged_prev())
+    self.safety.set_timer(t + 40000)
+    self.assertFalse(self._tx(self.base._angle_cmd_msg(8.0, 1, increment_timer=False)))
+
+  def test_opposite_yank_at_full_lateral_clears_controls(self):
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=0.0)
+    self.safety.set_timer(t + 20000)
+    self._rx(self._epas(0.0, 3, torque=-2.0))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_roundabout_flag_yields_an_opposite_yank(self):
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=0.0)
+    self.safety.set_timer(t + 20000)
+    self.assertFalse(self._flag(0x01))  # intercepted, not forwarded
+    self._rx(self._epas(0.0, 3, torque=-2.0))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self.base._angle_cmd_msg(8.0, 1, increment_timer=False)))
+
+  def test_undertrack_flag_yields_when_torque_matches_the_wheel(self):
+    # Command lags the wheel: error sign opposes the helping torque.
+    t = self._engage()
+    t = self._ramp_cmd(t, 10.0, meas=10.0)
+    self.safety.set_timer(t + 20000)
+    self.assertFalse(self._flag(0x02))
+    self._rx(self._epas(18.0, 3, torque=2.0))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_undertrack_flag_does_not_save_an_opposite_yank(self):
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=4.0)
+    self.safety.set_timer(t + 20000)
+    self._flag(0x02)
+    self._rx(self._epas(4.0, 3, torque=-2.0))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_epas_reject_with_hands_off_still_clears_controls(self):
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=0.0)
+    self.safety.set_timer(t + 20000)
+    self._flag(0x01)
+    self._rx(self._epas(0.0, 0, eac_status=0, eac_error_code=8))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_stale_or_invalid_flag_does_not_widen_yield(self):
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=0.0)
+    self.safety.set_timer(t + 20000)
+    self._flag(0x01)
+    # Keep type 1 flowing so this stays full lateral while the flag ages out.
+    for i in range(20):
+      ti = t + 40000 + i * 20000
+      self.safety.set_timer(ti)
+      self._rx(self._epas(0.0, 0))
+      self.assertTrue(self._tx(self.base._angle_cmd_msg(8.0, 1, increment_timer=False)))
+    self.safety.set_timer(t + 40000 + 20 * 20000)
+    self._rx(self._epas(0.0, 3, torque=-2.0))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_invalid_flag_magic_does_not_widen_yield(self):
+    from opendbc.safety.tests.libsafety import libsafety_py
+    t = self._engage()
+    t = self._ramp_cmd(t, 8.0, meas=0.0)
+    self.safety.set_timer(t + 20000)
+    self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x561, 0, bytes([0xB1]))))
+    self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x561, 0, bytes([0xA4]))))
+    self._rx(self._epas(0.0, 3, torque=-2.0))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+
 class TestTeslaPreAPLatYieldSteeringOnly(_LatYieldMixin, unittest.TestCase):
   __test__ = True
   BASE = preap_tests.TestTeslaPreAPSteeringOnly

@@ -114,6 +114,11 @@ class CarController(CarControllerBase):
       # tesla_preap_latyield.h (see the module docstring), or a driver
       # maneuver cancels OP (or a real yank is ignored).
       lat_yield.note_steer_tx(bool(lat_active), engaged=bool(CS.engagement.cruiseEnabled))
+      # Last allowed type-1 angle (carState frame). The hands-edge help
+      # check compares it with the measured angle. Type 0 must not overwrite
+      # it: panda only records an allowed type-1 command.
+      if lat_active:
+        CS.engagement._nap_cmd_angle_deg = float(self.apply_angle_last)
       can_sends.append(self.tesla_can.create_epas_control(cntr, 1))
 
     # Reset pccEvent each tick so it expresses one-frame edge events. Without

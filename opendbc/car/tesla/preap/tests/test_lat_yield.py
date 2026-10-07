@@ -320,6 +320,51 @@ class TestCardIntegration(unittest.TestCase):
     ci.update(self._epas(0, eac_status=0, eac_error=7))
     self.assertTrue(ci.CS.engagement.cruiseEnabled)
 
+  def test_same_direction_and_roundabout_predicates(self):
+    # Angle error: command more right than the wheel, driver torque to the right.
+    self.assertTrue(ly.torque_helps_op(-3.5, -40.0, -30.0))
+    # Driver ahead of a lagging command: angle error opposes, not help...
+    self.assertFalse(ly.torque_helps_op(-3.5, -30.0, -40.0))
+    # ...unless OP is under-tracking and the torque matches the wheel.
+    self.assertTrue(ly.torque_helps_op(-3.5, -30.0, -40.0, undertrack=True))
+    # Opposite yank, even while under-tracking a right wheel.
+    self.assertFalse(ly.torque_helps_op(3.5, -50.0, -40.0, undertrack=True))
+    # Deadband is not help.
+    self.assertFalse(ly.torque_helps_op(0.2, -40.0, -30.0))
+    self.assertFalse(ly.torque_helps_op(-3.5, -30.5, -30.0))
+    self.assertFalse(ly.hands_edge_is_yield(
+      hands=0, torque_nm=-3.5, commanded_angle_deg=-40.0, measured_angle_deg=-30.0))
+    self.assertTrue(ly.hands_edge_is_yield(
+      hands=3, torque_nm=-3.5, commanded_angle_deg=-40.0, measured_angle_deg=-30.0))
+    self.assertFalse(ly.hands_edge_is_yield(
+      hands=3, torque_nm=3.5, commanded_angle_deg=-40.0, measured_angle_deg=-30.0))
+    # Roundabout: any hands-on, including an opposite yank. Hands-off EPAS reject is not.
+    self.assertTrue(ly.hands_edge_is_yield(
+      hands=2, torque_nm=3.5, commanded_angle_deg=-40.0, measured_angle_deg=-30.0, roundabout=True))
+    self.assertFalse(ly.hands_edge_is_yield(
+      hands=0, torque_nm=0.0, commanded_angle_deg=-40.0, measured_angle_deg=-30.0, roundabout=True))
+    self.assertTrue(ly.roundabout_yield_context(False, True, 40.0))
+    self.assertTrue(ly.roundabout_yield_context(True, False, 100.0))
+    self.assertFalse(ly.roundabout_yield_context(False, True, 41.0))
+    self.assertEqual(ly.encode_yield_flag(True, True), bytes((0xA3,)))
+    self.assertEqual(ly.encode_yield_flag(False, False), bytes((0xA0,)))
+
+  def test_farm_torque_trace_final_yank_is_a_yield(self):
+    # 14:32:18-19, one sample per frame (not held). Right turn, driver ahead
+    # of the command, curvature under-tracked. Hands 0 until the last sample.
+    torques = [0.70, -0.95, 0.47, -2.19, 0.86, -1.79, 0.15, -1.00, -3.29, -3.77]
+    for i, tq in enumerate(torques):
+      meas = -26.0 + (-44.0 + 26.0) * i / (len(torques) - 1)
+      cmd = meas + 8.0  # command lags the wheel
+      hands = 3 if i == len(torques) - 1 else 0
+      got = ly.hands_edge_is_yield(
+        hands=hands, torque_nm=tq, commanded_angle_deg=cmd, measured_angle_deg=meas,
+        undertrack=True)
+      self.assertEqual(got, i == len(torques) - 1)
+    # Opposite final yank (positive torque, command still to the right of the wheel).
+    self.assertFalse(ly.hands_edge_is_yield(
+      hands=3, torque_nm=3.77, commanded_angle_deg=-50.0, measured_angle_deg=-40.0, undertrack=True))
+
   def test_not_engaged_resets_history(self):
     ci, clk = self._ci()
     self._steer(ci, clk, 0.5)
