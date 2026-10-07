@@ -224,6 +224,8 @@ struct CarState {
   enableLongControl @77 :Bool;  # Pre-AP: FSM longitudinal intent; survives gas override
   gapLockArmSeq @78 :UInt8;  # Pre-AP: increments once per qualified 2 s engage-stalk hold
   gapLockHold @79 :Bool;     # Pre-AP: engage stalk is in a gap-lock hold (before or after the latch)
+  napStalkSeq @80 :UInt8;    # Pre-AP: increments on each in-session engage-stalk pull (controlsd already reads carState)
+  napRestTorqueNm @81 :Float32;  # Pre-AP: learned hands-off torsion offset, Nm. 0 until learned
 
   # cruise state
   cruiseState @10 :CruiseState;
