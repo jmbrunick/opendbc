@@ -176,6 +176,25 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     self.assertFalse(CI.CS.real_brake_pressed)
     self.assertFalse(CS.brakePressed)
 
+  def test_driver_brake_applied_publishes_the_switch_and_keeps_brake_pressed_false(self):
+    CI = self._make_interface()
+
+    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 1}))
+    self.assertTrue(CS.driverBrakeApplied)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
+    self.assertFalse(CS.driverBrakeApplied)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 2}))
+    self.assertTrue(CS.driverBrakeApplied)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
+    self.assertFalse(CS.driverBrakeApplied)
+    self.assertFalse(CS.brakePressed)
+
 
 if __name__ == "__main__":
   unittest.main()

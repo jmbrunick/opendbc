@@ -141,8 +141,11 @@ def update_preap(cs, can_parsers):
     cs.cruise_buttons, cs.prev_cruise_buttons, curr_time_ms,
     ret.vEgo, cs.speed_units, use_pedal, pedal_long_allowed,
     long_control_allowed, cs.real_brake_pressed, cs.di_cruise_state)
-  # Suppress brakePressed so generic brake-disengage path doesn't kill lateral
+  # Suppress brakePressed so generic brake-disengage path doesn't kill lateral.
+  # driverBrakeApplied is the same switch for checks that must see the pedal
+  # without taking that disengage path.
   ret.brakePressed = False
+  ret.driverBrakeApplied = bool(cs.real_brake_pressed)
   ret.buttonEvents = button_events
 
   # The lamp stays latched while openpilot drives it. Publish the physical

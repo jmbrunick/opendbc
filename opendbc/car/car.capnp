@@ -226,6 +226,7 @@ struct CarState {
   gapLockHold @79 :Bool;     # Pre-AP: engage stalk is in a gap-lock hold (before or after the latch)
   napStalkSeq @80 :UInt8;    # Pre-AP: increments on each in-session engage-stalk pull (controlsd already reads carState)
   napRestTorqueNm @81 :Float32;  # Pre-AP: learned hands-off torsion offset, Nm. 0 until learned
+  driverBrakeApplied @82 :Bool;  # Pre-AP: digital brake switch (0x118 bit 15 / 0x20A). brakePressed stays false so a press does not kill lateral.
 
   # cruise state
   cruiseState @10 :CruiseState;
