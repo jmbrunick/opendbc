@@ -196,6 +196,7 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
     {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
     {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
+    {0x561, 0, 1, .check_relay = false, .disable_static_blocking = true},  // host yield context, not forwarded
     {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
   };
 
