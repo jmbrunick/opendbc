@@ -15,13 +15,11 @@ class CarController(CarControllerBase):
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
-
     can_sends = []
 
     # steering command
     if self.frame % CarControllerParams.STEER_STEP == 0:
       if CC.latActive:
-        # calculate steer and also set limits due to driver torque
         new_torque = int(round(actuators.torque * CarControllerParams.STEER_MAX))
         apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, CarControllerParams)
       else:

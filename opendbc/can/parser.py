@@ -11,21 +11,6 @@ MAX_BAD_COUNTER = 5
 CAN_INVALID_CNT = 5
 
 
-def get_raw_value(dat: bytes | bytearray, sig: Signal) -> int:
-  ret = 0
-  i = sig.msb // 8
-  bits = sig.size
-  while 0 <= i < len(dat) and bits > 0:
-    lsb = sig.lsb if (sig.lsb // 8) == i else i * 8
-    msb = sig.msb if (sig.msb // 8) == i else (i + 1) * 8 - 1
-    size = msb - lsb + 1
-    d = (dat[i] >> (lsb - (i * 8))) & ((1 << size) - 1)
-    ret |= d << (bits - size)
-    bits -= size
-    i = i - 1 if sig.is_little_endian else i + 1
-  return ret
-
-
 @dataclass
 class MessageState:
   address: int
@@ -59,7 +44,7 @@ class MessageState:
       self.first_seen_nanos = nanos
 
     for i, sig in enumerate(self.signals):
-      tmp = get_raw_value(dat, sig)
+      tmp = sig.get_raw_value(dat)
       if sig.is_signed:
         tmp -= ((tmp >> (sig.size - 1)) & 0x1) * (1 << sig.size)
 
@@ -91,7 +76,7 @@ class MessageState:
 
     if self.frequency < 1e-5 and len(self.timestamps) >= 3:
       dt = (self.timestamps[-1] - self.timestamps[0]) * 1e-9
-      if (dt > 1.0 or len(self.timestamps) >= self.timestamps.maxlen) and dt != 0:
+      if (dt > 1.0 or (self.timestamps.maxlen is not None and len(self.timestamps) >= self.timestamps.maxlen)) and dt != 0:
         self.frequency = min(len(self.timestamps) / dt, 100.0)
         self.timeout_threshold = (1_000_000_000 / self.frequency) * 10
     return True
@@ -129,7 +114,7 @@ class CANParser:
   def __init__(self, dbc_name: str, messages: list[tuple[str | int, int]], bus: int):
     self.dbc_name: str = dbc_name
     self.bus: int = bus
-    self.dbc: DBC = DBC(dbc_name)
+    self.dbc = DBC(dbc_name)
 
     self.vl: dict[int | str, dict[str, float]] = VLDict(self)
     self.vl_all: dict[int | str, dict[str, list[float]]] = {}
@@ -153,7 +138,7 @@ class CANParser:
     self.last_nonempty_nanos: int = 0
     self._last_update_nanos: int = 0
 
-  def _add_message(self, name_or_addr: str | int, freq: int = None) -> None:
+  def _add_message(self, name_or_addr: str | int, freq: int | None = None) -> None:
     if isinstance(name_or_addr, numbers.Number):
       msg = self.dbc.addr_to_msg.get(int(name_or_addr))
     else:

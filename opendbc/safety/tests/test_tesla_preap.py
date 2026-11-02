@@ -545,7 +545,7 @@ class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, unittest.TestCase):
     # Tick 500ms after msgs — under the 1s min lag window for real checks but long
     # enough that a freq=0 divide-by-zero would have already tripped the pedal row.
     self.safety.set_timer(int(5e5))
-    self.safety.safety_tick_current_safety_config()
+    self.safety.safety_tick()
     self.assertTrue(self.safety.safety_config_valid(),
                     "rx_checks must stay valid without a pedal installed")
 
@@ -964,7 +964,7 @@ class TestTeslaPreAPPedalCalibration(unittest.TestCase):
     self._rx(self.packer.make_can_msg_safety("GTW_carState", 0, {"DOOR_STATE_FL": 0}))
     self._rx(self.packer.make_can_msg_safety("STW_ACTN_RQ", 0, {"SpdCtrlLvr_Stat": 0}))
     self.safety.set_timer(int(5e5))
-    self.safety.safety_tick_current_safety_config()
+    self.safety.safety_tick()
     self.assertTrue(self.safety.safety_config_valid())
 
 

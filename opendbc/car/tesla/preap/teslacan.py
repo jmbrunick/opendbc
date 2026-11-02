@@ -1,5 +1,5 @@
 import struct
-import crcmod
+from opendbc.car.crc import CRC8J1850, mk_crc8_fun
 from ctypes import create_string_buffer
 from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven
 from opendbc.car.tesla.values import CANBUS
@@ -47,7 +47,7 @@ class TeslaCANPreAP(TeslaCANRaven):
     # Pedal firmware watchdog requires consecutive counter values
     self.pedal_idx = 0
     # STW_ACTN_RQ uses CRC-8 (poly 0x1D), not the byte-sum checksum
-    self.stw_crc = crcmod.mkCrcFun(0x11d, initCrc=0x00, rev=False, xorOut=0xff)
+    self.stw_crc = mk_crc8_fun(CRC8J1850, init_crc=0x00, xor_out=0xff)  # == crcmod.mkCrcFun(0x11d, initCrc=0, rev=False, xorOut=0xff)
 
   @staticmethod
   def pedal_checksum(msg_id, dat):

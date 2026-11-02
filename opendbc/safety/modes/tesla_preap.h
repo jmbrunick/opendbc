@@ -75,8 +75,8 @@ void can_set_checksum(CANPacket_t *packet);
 // Byte manipulation macros
 // ============================================
 
-#define PREAP_GET_BYTES_04(msg) ((msg)->data[0] | ((msg)->data[1] << 8) | ((msg)->data[2] << 16) | ((msg)->data[3] << 24))
-#define PREAP_GET_BYTES_48(msg) ((msg)->data[4] | ((msg)->data[5] << 8) | ((msg)->data[6] << 16) | ((msg)->data[7] << 24))
+#define PREAP_GET_BYTES_04(msg) ((uint32_t)(msg)->data[0] | ((uint32_t)(msg)->data[1] << 8) | ((uint32_t)(msg)->data[2] << 16) | ((uint32_t)(msg)->data[3] << 24))
+#define PREAP_GET_BYTES_48(msg) ((uint32_t)(msg)->data[4] | ((uint32_t)(msg)->data[5] << 8) | ((uint32_t)(msg)->data[6] << 16) | ((uint32_t)(msg)->data[7] << 24))
 #define PREAP_WORD_TO_BYTES(dst8, src32) 0[dst8] = ((src32) & 0xFFU); 1[dst8] = (((src32) >> 8U) & 0xFFU); 2[dst8] = (((src32) >> 16U) & 0xFFU); 3[dst8] = (((src32) >> 24U) & 0xFFU)
 
 // ============================================
