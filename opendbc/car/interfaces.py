@@ -209,6 +209,14 @@ class CarInterfaceBase(ABC):
     ret.stopAccel = -2.0
     ret.longitudinalTuning.kiBP = [0.]
     ret.longitudinalTuning.kiV = [0.]
+    # NAP: restore pre-0.11.2 defaults for fields NAP's longcontrol/planner still read
+    # (comma deprecated them in 0.11.2 and stopped setting them; without these,
+    # vEgoStopping=0 means shouldStop never fires and empty kpBP breaks the PID)
+    ret.longitudinalTuning.kpBP = [0.]
+    ret.longitudinalTuning.kpV = [0.]
+    ret.stoppingDecelRate = 0.8  # brake_travel/s while trying to stop
+    ret.vEgoStopping = 0.5
+    ret.vEgoStarting = 0.5
     # TODO estimate car specific lag, use .15s for now
     ret.longitudinalActuatorDelay = 0.15
     ret.steerLimitTimer = 1.0
